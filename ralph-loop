@@ -1112,6 +1112,9 @@ run_ralph_loop() {
             echo ""
         fi
 
+        # Snapshot PRD state for error recovery
+        cp "$JSON_FILE" "${JSON_FILE}.pre-iteration"
+
         # Create temporary file for prompt
         local prompt_file=$(mktemp)
         echo "$claude_prompt" > "$prompt_file"
@@ -1234,6 +1237,17 @@ Try again later or check Claude API status at https://status.anthropic.com"
 
         rm -f "$prompt_file"
 
+        # Validate JSON wasn't corrupted by Claude
+        local json_valid
+        json_valid=$(node lib/criteria/index.js validate-json --file "$JSON_FILE" 2>&1)
+        if [ $? -ne 0 ]; then
+            echo -e "${YELLOW}⚠ JSON file corrupted during iteration. Restoring from snapshot.${NC}"
+            cp "${JSON_FILE}.pre-iteration" "$JSON_FILE"
+            log_iteration_result "$iteration" "$next_task_id" "FAILED" "JSON corrupted, restored from snapshot"
+            iteration=$((iteration + 1))
+            continue
+        fi
+
         # Show API metadata in verbose/debug mode
         if [ "$VERBOSE" = true ] || [ "$DEBUG" = true ]; then
             echo ""
@@ -1280,46 +1294,71 @@ Try again later or check Claude API status at https://status.anthropic.com"
             echo ""
         fi
 
-        # Check for completion promise
-        if echo "$claude_output" | grep -q "<promise>COMPLETE</promise>"; then
+        # Run criteria verification
+        local verify_result
+        verify_result=$(node lib/criteria/index.js verify --task-file "$JSON_FILE" --task-id "$next_task_id" 2>&1)
+        local verify_exit=$?
+
+        if [ "$DEBUG" = true ]; then
+            echo -e "${BLUE}[DEBUG] Criteria verification result: $verify_result${NC}"
+        fi
+
+        # Update per-criterion tracking in PRD JSON
+        local task_index=$(jq ".tasks | map(.id) | index(\"$next_task_id\")" "$JSON_FILE")
+        local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+        if [ "$verify_exit" -eq 0 ]; then
+            # All criteria passed — mark task complete
+            local updated_prd=$(jq \
+                --argjson idx "$task_index" \
+                --arg now "$now" \
+                --argjson results "$verify_result" \
+                '.tasks[$idx].passes = true |
+                 .tasks[$idx].completedAt = $now |
+                 .tasks[$idx].criteriaResults = $results.results' \
+                "$JSON_FILE")
+            echo "$updated_prd" | jq '.' > "$JSON_FILE"
+
+            log_iteration_result "$iteration" "$next_task_id" "PASSED" "All criteria verified"
+
             if [ "$VERBOSE" = true ]; then
-                echo -e "${GREEN}[INFO] Completion promise detected! Verifying all tasks...${NC}"
+                echo -e "${GREEN}[INFO] Task $next_task_id: All criteria passed!${NC}"
             fi
+        else
+            # Some criteria failed — update results but keep passes=false
+            local updated_prd=$(jq \
+                --argjson idx "$task_index" \
+                --arg now "$now" \
+                --argjson results "$verify_result" \
+                '.tasks[$idx].criteriaResults = $results.results' \
+                "$JSON_FILE" 2>/dev/null || cat "$JSON_FILE")
+            echo "$updated_prd" | jq '.' > "$JSON_FILE" 2>/dev/null || true
 
-            # Verify that all tasks actually have passes=true
-            local all_tasks_passed=$(jq '[.tasks[] | select(.passes == false)] | length' "$JSON_FILE")
+            log_iteration_result "$iteration" "$next_task_id" "IN PROGRESS" "Criteria verification: some failed"
 
-            if [ "$all_tasks_passed" -eq 0 ]; then
-                # All tasks genuinely complete
-                completion_detected=true
-                log_iteration_result "$iteration" "$next_task_id" "COMPLETE" "All tasks passed"
-                log_learnings "All PRD tasks have been completed successfully."
-
-                if [ "$VERBOSE" = true ]; then
-                    echo -e "${GREEN}[INFO] Verification passed: All tasks completed!${NC}"
-                fi
-                break
-            else
-                # Some tasks still incomplete despite promise
-                if [ "$VERBOSE" = true ]; then
-                    echo -e "${YELLOW}[WARNING] Completion promise detected but $all_tasks_passed tasks still incomplete. Continuing...${NC}"
-                fi
-                log_iteration_result "$iteration" "$next_task_id" "IN PROGRESS" "Completion promise detected but tasks remain incomplete"
+            if [ "$VERBOSE" = true ]; then
+                local pass_count=$(echo "$verify_result" | jq '[.results[] | select(.passed == true)] | length' 2>/dev/null || echo "?")
+                local total_count=$(echo "$verify_result" | jq '.results | length' 2>/dev/null || echo "?")
+                echo -e "${YELLOW}[INFO] Task $next_task_id: $pass_count/$total_count criteria passing${NC}"
             fi
         fi
 
-        # Read updated PRD to check task status
-        local updated_task=$(get_task_details "$next_task_id")
-        local task_passes=$(echo "$updated_task" | jq -r '.passes')
-
-        if [ "$task_passes" = "true" ]; then
-            log_iteration_result "$iteration" "$next_task_id" "PASSED" "Task completed successfully"
-        else
-            log_iteration_result "$iteration" "$next_task_id" "IN PROGRESS" "Task still being worked on"
+        # Check if ALL tasks are now complete
+        local remaining=$(jq '[.tasks[] | select(.passes == false)] | length' "$JSON_FILE")
+        if [ "$remaining" -eq 0 ]; then
+            completion_detected=true
+            log_learnings "All PRD tasks have been completed successfully."
+            if [ "$VERBOSE" = true ]; then
+                echo -e "${GREEN}[INFO] All tasks completed!${NC}"
+            fi
+            break
         fi
 
         # Show progress visualization
         show_progress "$iteration" "$start_time"
+
+        # Clean up iteration snapshot
+        rm -f "${JSON_FILE}.pre-iteration"
 
         # Increment iteration
         iteration=$((iteration + 1))
