@@ -589,6 +589,42 @@ analyze_prd() {
     echo "  Average Acceptance Criteria per Task: $avg_criteria"
     echo ""
 
+    # Criteria type breakdown
+    local total_criteria=$(echo "$prd_content" | jq '[.tasks[].acceptanceCriteria[]] | length')
+    local typed_criteria=0
+    local manual_criteria=0
+
+    # Count criteria with inline type hints or typed objects
+    while IFS= read -r criterion; do
+        if echo "$criterion" | grep -qE '`\[(shell|http|file-exists|grep):'; then
+            typed_criteria=$((typed_criteria + 1))
+        elif echo "$criterion" | jq -e '.type // empty' > /dev/null 2>&1; then
+            local ctype=$(echo "$criterion" | jq -r '.type')
+            if [ "$ctype" != "manual" ]; then
+                typed_criteria=$((typed_criteria + 1))
+            else
+                manual_criteria=$((manual_criteria + 1))
+            fi
+        else
+            manual_criteria=$((manual_criteria + 1))
+        fi
+    done <<< "$(echo "$prd_content" | jq -r '.tasks[].acceptanceCriteria[]')"
+
+    local executable_pct=0
+    if [ "$total_criteria" -gt 0 ]; then
+        executable_pct=$((typed_criteria * 100 / total_criteria))
+    fi
+
+    echo -e "${BLUE}Criteria Analysis:${NC}"
+    echo "  Total Criteria: $total_criteria"
+    echo "  Executable (typed): $typed_criteria"
+    echo "  Manual (untyped): $manual_criteria"
+    echo "  Executable Coverage: ${executable_pct}%"
+    if [ "$executable_pct" -lt 50 ]; then
+        echo -e "  ${YELLOW}⚠ Low executable coverage. Add type hints to criteria for automated verification.${NC}"
+    fi
+    echo ""
+
     # Create analysis prompt for Claude
     local analysis_prompt="You are a PRD quality analyzer. Analyze the following Product Requirements Document (PRD) and provide detailed feedback on its quality.
 
