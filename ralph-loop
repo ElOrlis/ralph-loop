@@ -1076,12 +1076,35 @@ run_ralph_loop() {
             echo -e "${BLUE}[INFO] Working on: $next_task_id - $task_title${NC}"
         fi
 
-        # Generate Claude prompt
-        local claude_prompt="1. Read $JSON_FILE to find the highest-priority failing task.
-2. Work only on that single task.
-3. Run tests to verify the fix.
-4. Update $JSON_FILE (set passes: true) and log learnings to $PROGRESS_FILE
-5. Output \"<promise>COMPLETE</promise>\" only when all PRD tasks pass."
+        # Generate Claude prompt via prompt builder
+        local json_basename=$(basename "$JSON_FILE")
+        local progress_basename=$(basename "$PROGRESS_FILE")
+        local claude_prompt
+        claude_prompt=$(node lib/prompt/index.js build \
+            --task-file "$JSON_FILE" \
+            --task-id "$next_task_id" \
+            --json-file "$json_basename" \
+            --progress-file "$progress_basename" 2>&1)
+
+        if [ $? -ne 0 ]; then
+            error_exit "Failed to build prompt for task $next_task_id" "Check lib/prompt/ module. Error: $claude_prompt"
+        fi
+
+        # --dry-run: show prompt and exit
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${BLUE}║                         DRY RUN — PROMPT PREVIEW                           ║${NC}"
+            echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo "Task: $next_task_id - $task_title"
+            echo ""
+            echo "────────────────────────────────────────────────────────────────────────────"
+            echo "$claude_prompt"
+            echo "────────────────────────────────────────────────────────────────────────────"
+            echo ""
+            echo -e "${YELLOW}Dry run complete. No API call made.${NC}"
+            exit 0
+        fi
 
         if [ "$DEBUG" = true ]; then
             echo -e "${BLUE}[DEBUG] Claude prompt:${NC}"
