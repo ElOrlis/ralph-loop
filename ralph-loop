@@ -11,6 +11,8 @@ VERBOSE=false
 DEBUG=false
 RESUME=false
 ANALYZE_PRD=false
+DRY_RUN=false
+GITHUB_ENABLED=true
 PRD_FILE=""
 JSON_FILE=""
 PROGRESS_FILE=""
@@ -67,6 +69,8 @@ OPTIONS:
   --resume                Resume from last checkpoint in progress.txt
   --analyze-prd           Analyze PRD quality and suggest improvements
   --help                  Show this help message
+  --dry-run               Show next prompt and exit (don't call Claude)
+  --no-github             Disable all GitHub integration
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
@@ -229,6 +233,14 @@ parse_arguments() {
                 ;;
             --analyze-prd)
                 ANALYZE_PRD=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --no-github)
+                GITHUB_ENABLED=false
                 shift
                 ;;
             -*)
