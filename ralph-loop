@@ -1047,6 +1047,34 @@ update_task_attempts() {
     fi
 }
 
+# Check for thrash: criterion failing 4+ consecutive times with no progress
+check_thrash() {
+    local task_id="$1"
+    local task_index=$(jq ".tasks | map(.id) | index(\"$task_id\")" "$JSON_FILE")
+    local criteria_results=$(jq -r ".tasks[$task_index].criteriaResults // []" "$JSON_FILE")
+    local results_count=$(echo "$criteria_results" | jq 'length')
+
+    if [ "$results_count" -eq 0 ]; then
+        return 1  # No results yet, no thrash
+    fi
+
+    # Check each criterion for consecutive failures
+    local i=0
+    while [ $i -lt $results_count ]; do
+        local attempts=$(echo "$criteria_results" | jq ".[$i].attempts // 0")
+        local passed=$(echo "$criteria_results" | jq ".[$i].passed")
+
+        if [ "$passed" = "false" ] && [ "$attempts" -ge 4 ]; then
+            echo "$i"
+            return 0  # Thrash detected, return criterion index
+        fi
+
+        i=$((i + 1))
+    done
+
+    return 1  # No thrash
+}
+
 # Run the main Ralph Loop
 run_ralph_loop() {
     echo ""
@@ -1376,6 +1404,54 @@ Try again later or check Claude API status at https://status.anthropic.com"
                 local pass_count=$(echo "$verify_result" | jq '[.results[] | select(.passed == true)] | length' 2>/dev/null || echo "?")
                 local total_count=$(echo "$verify_result" | jq '.results | length' 2>/dev/null || echo "?")
                 echo -e "${YELLOW}[INFO] Task $next_task_id: $pass_count/$total_count criteria passing${NC}"
+            fi
+
+            # Update per-criterion attempt tracking
+            local result_idx=0
+            local result_count=$(echo "$verify_result" | jq '.results | length' 2>/dev/null || echo "0")
+            while [ $result_idx -lt $result_count ]; do
+                local crit_passed=$(echo "$verify_result" | jq ".results[$result_idx].passed")
+                if [ "$crit_passed" = "false" ]; then
+                    local prev_attempts=$(jq ".tasks[$task_index].criteriaResults[$result_idx].attempts // 0" "$JSON_FILE")
+                    local new_attempts=$((prev_attempts + 1))
+                    local updated=$(jq \
+                        --argjson idx "$task_index" \
+                        --argjson cidx "$result_idx" \
+                        --argjson attempts "$new_attempts" \
+                        '.tasks[$idx].criteriaResults[$cidx].attempts = $attempts' \
+                        "$JSON_FILE")
+                    echo "$updated" | jq '.' > "$JSON_FILE"
+                else
+                    # Reset attempt counter on pass
+                    local updated=$(jq \
+                        --argjson idx "$task_index" \
+                        --argjson cidx "$result_idx" \
+                        '.tasks[$idx].criteriaResults[$cidx].attempts = 0' \
+                        "$JSON_FILE")
+                    echo "$updated" | jq '.' > "$JSON_FILE"
+                fi
+                result_idx=$((result_idx + 1))
+            done
+
+            # Check for thrash
+            local thrash_criterion
+            if thrash_criterion=$(check_thrash "$next_task_id"); then
+                echo ""
+                echo -e "${YELLOW}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
+                echo -e "${YELLOW}║                          THRASH WARNING                                    ║${NC}"
+                echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
+                echo ""
+                echo -e "${YELLOW}Warning: Task $next_task_id has stalled: criterion $thrash_criterion has failed 4+${NC}"
+                echo -e "${YELLOW}  consecutive times with no progress on other criteria.${NC}"
+                echo -e "${YELLOW}  Consider: revising the criterion, splitting the task, or running --analyze-prd.${NC}"
+                echo ""
+                read -p "  Continue? [Y/n] " -n 1 -r
+                echo ""
+                if [[ $REPLY =~ ^[Nn]$ ]]; then
+                    echo -e "${RED}Stopping at user request.${NC}"
+                    log_iteration_result "$iteration" "$next_task_id" "STALLED" "User stopped after thrash warning on criterion $thrash_criterion"
+                    break
+                fi
             fi
         fi
 
