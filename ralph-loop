@@ -595,6 +595,45 @@ resolve_target_repo() {
     fi
 }
 
+# On resume, cross-check task issue states for consistency
+crosscheck_issues() {
+    if [ "$GITHUB_ENABLED" = false ]; then
+        return 0
+    fi
+
+    local task_count=$(jq '.tasks | length' "$JSON_FILE")
+    local idx=0
+    local warnings=0
+
+    while [ $idx -lt $task_count ]; do
+        local issue_number=$(jq -r ".tasks[$idx].issueNumber // empty" "$JSON_FILE")
+        local task_passes=$(jq -r ".tasks[$idx].passes" "$JSON_FILE")
+        local task_id=$(jq -r ".tasks[$idx].id" "$JSON_FILE")
+
+        if [ -n "$issue_number" ]; then
+            # Check issue state via gh
+            local issue_state
+            issue_state=$(gh issue view "$issue_number" --repo "$TARGET_REPO" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+
+            if [ "$task_passes" = "true" ] && [ "$issue_state" = "OPEN" ]; then
+                echo -e "${YELLOW}[WARN] Task $task_id is marked complete but issue #$issue_number is still open${NC}"
+                warnings=$((warnings + 1))
+            elif [ "$task_passes" = "false" ] && [ "$issue_state" = "CLOSED" ]; then
+                echo -e "${YELLOW}[WARN] Task $task_id is incomplete but issue #$issue_number is closed${NC}"
+                warnings=$((warnings + 1))
+            fi
+        fi
+
+        idx=$((idx + 1))
+    done
+
+    if [ $warnings -gt 0 ]; then
+        echo -e "${YELLOW}[WARN] Found $warnings issue state inconsistencies. Local JSON is source of truth.${NC}"
+    elif [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Issue cross-check passed — all consistent${NC}"
+    fi
+}
+
 # Analyze PRD quality using Claude API
 analyze_prd() {
     local json_file="$1"
@@ -1262,6 +1301,9 @@ run_ralph_loop() {
             error_exit "Cannot resume: last iteration ($last_iteration) already at or exceeds max iterations ($MAX_ITERATIONS)." "Use --max-iterations with a higher value, e.g.:
   ./ralph-loop $PRD_FILE --resume --max-iterations $((last_iteration + 10))"
         fi
+
+        # Cross-check GitHub issue states
+        crosscheck_issues
     fi
 
     local completion_detected=false
