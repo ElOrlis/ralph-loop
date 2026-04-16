@@ -34,6 +34,7 @@ TEST_SCRIPTS=(
     "test-completion-detection.sh"
     "test-criteria.sh"
     "test-dry-run.sh"
+    "test-github.sh"
 )
 
 # Run each test suite
