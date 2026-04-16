@@ -32,6 +32,8 @@ TEST_SCRIPTS=(
     "test-help.sh"
     "test-analysis.sh"
     "test-completion-detection.sh"
+    "test-criteria.sh"
+    "test-dry-run.sh"
 )
 
 # Run each test suite

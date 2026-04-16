@@ -11,6 +11,8 @@ VERBOSE=false
 DEBUG=false
 RESUME=false
 ANALYZE_PRD=false
+DRY_RUN=false
+GITHUB_ENABLED=true
 PRD_FILE=""
 JSON_FILE=""
 PROGRESS_FILE=""
@@ -67,6 +69,8 @@ OPTIONS:
   --resume                Resume from last checkpoint in progress.txt
   --analyze-prd           Analyze PRD quality and suggest improvements
   --help                  Show this help message
+  --dry-run               Show next prompt and exit (don't call Claude)
+  --no-github             Disable all GitHub integration
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
@@ -229,6 +233,14 @@ parse_arguments() {
                 ;;
             --analyze-prd)
                 ANALYZE_PRD=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --no-github)
+                GITHUB_ENABLED=false
                 shift
                 ;;
             -*)
@@ -575,6 +587,42 @@ analyze_prd() {
     echo "  Categories:"
     echo "$categories"
     echo "  Average Acceptance Criteria per Task: $avg_criteria"
+    echo ""
+
+    # Criteria type breakdown
+    local total_criteria=$(echo "$prd_content" | jq '[.tasks[].acceptanceCriteria[]] | length')
+    local typed_criteria=0
+    local manual_criteria=0
+
+    # Count criteria with inline type hints or typed objects
+    while IFS= read -r criterion; do
+        if echo "$criterion" | grep -qE '`\[(shell|http|file-exists|grep):'; then
+            typed_criteria=$((typed_criteria + 1))
+        elif echo "$criterion" | jq -e '.type // empty' > /dev/null 2>&1; then
+            local ctype=$(echo "$criterion" | jq -r '.type')
+            if [ "$ctype" != "manual" ]; then
+                typed_criteria=$((typed_criteria + 1))
+            else
+                manual_criteria=$((manual_criteria + 1))
+            fi
+        else
+            manual_criteria=$((manual_criteria + 1))
+        fi
+    done <<< "$(echo "$prd_content" | jq -r '.tasks[].acceptanceCriteria[]')"
+
+    local executable_pct=0
+    if [ "$total_criteria" -gt 0 ]; then
+        executable_pct=$((typed_criteria * 100 / total_criteria))
+    fi
+
+    echo -e "${BLUE}Criteria Analysis:${NC}"
+    echo "  Total Criteria: $total_criteria"
+    echo "  Executable (typed): $typed_criteria"
+    echo "  Manual (untyped): $manual_criteria"
+    echo "  Executable Coverage: ${executable_pct}%"
+    if [ "$executable_pct" -lt 50 ]; then
+        echo -e "  ${YELLOW}⚠ Low executable coverage. Add type hints to criteria for automated verification.${NC}"
+    fi
     echo ""
 
     # Create analysis prompt for Claude
@@ -999,6 +1047,34 @@ update_task_attempts() {
     fi
 }
 
+# Check for thrash: criterion failing 4+ consecutive times with no progress
+check_thrash() {
+    local task_id="$1"
+    local task_index=$(jq ".tasks | map(.id) | index(\"$task_id\")" "$JSON_FILE")
+    local criteria_results=$(jq -r ".tasks[$task_index].criteriaResults // []" "$JSON_FILE")
+    local results_count=$(echo "$criteria_results" | jq 'length')
+
+    if [ "$results_count" -eq 0 ]; then
+        return 1  # No results yet, no thrash
+    fi
+
+    # Check each criterion for consecutive failures
+    local i=0
+    while [ $i -lt $results_count ]; do
+        local attempts=$(echo "$criteria_results" | jq ".[$i].attempts // 0")
+        local passed=$(echo "$criteria_results" | jq ".[$i].passed")
+
+        if [ "$passed" = "false" ] && [ "$attempts" -ge 4 ]; then
+            echo "$i"
+            return 0  # Thrash detected, return criterion index
+        fi
+
+        i=$((i + 1))
+    done
+
+    return 1  # No thrash
+}
+
 # Run the main Ralph Loop
 run_ralph_loop() {
     echo ""
@@ -1064,18 +1140,44 @@ run_ralph_loop() {
             echo -e "${BLUE}[INFO] Working on: $next_task_id - $task_title${NC}"
         fi
 
-        # Generate Claude prompt
-        local claude_prompt="1. Read $JSON_FILE to find the highest-priority failing task.
-2. Work only on that single task.
-3. Run tests to verify the fix.
-4. Update $JSON_FILE (set passes: true) and log learnings to $PROGRESS_FILE
-5. Output \"<promise>COMPLETE</promise>\" only when all PRD tasks pass."
+        # Generate Claude prompt via prompt builder
+        local json_basename=$(basename "$JSON_FILE")
+        local progress_basename=$(basename "$PROGRESS_FILE")
+        local claude_prompt
+        claude_prompt=$(node lib/prompt/index.js build \
+            --task-file "$JSON_FILE" \
+            --task-id "$next_task_id" \
+            --json-file "$json_basename" \
+            --progress-file "$progress_basename" 2>&1)
+
+        if [ $? -ne 0 ]; then
+            error_exit "Failed to build prompt for task $next_task_id" "Check lib/prompt/ module. Error: $claude_prompt"
+        fi
+
+        # --dry-run: show prompt and exit
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${BLUE}║                         DRY RUN — PROMPT PREVIEW                           ║${NC}"
+            echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo "Task: $next_task_id - $task_title"
+            echo ""
+            echo "────────────────────────────────────────────────────────────────────────────"
+            echo "$claude_prompt"
+            echo "────────────────────────────────────────────────────────────────────────────"
+            echo ""
+            echo -e "${YELLOW}Dry run complete. No API call made.${NC}"
+            exit 0
+        fi
 
         if [ "$DEBUG" = true ]; then
             echo -e "${BLUE}[DEBUG] Claude prompt:${NC}"
             echo "$claude_prompt"
             echo ""
         fi
+
+        # Snapshot PRD state for error recovery
+        cp "$JSON_FILE" "${JSON_FILE}.pre-iteration"
 
         # Create temporary file for prompt
         local prompt_file=$(mktemp)
@@ -1199,6 +1301,17 @@ Try again later or check Claude API status at https://status.anthropic.com"
 
         rm -f "$prompt_file"
 
+        # Validate JSON wasn't corrupted by Claude
+        local json_valid
+        json_valid=$(node lib/criteria/index.js validate-json --file "$JSON_FILE" 2>&1)
+        if [ $? -ne 0 ]; then
+            echo -e "${YELLOW}⚠ JSON file corrupted during iteration. Restoring from snapshot.${NC}"
+            cp "${JSON_FILE}.pre-iteration" "$JSON_FILE"
+            log_iteration_result "$iteration" "$next_task_id" "FAILED" "JSON corrupted, restored from snapshot"
+            iteration=$((iteration + 1))
+            continue
+        fi
+
         # Show API metadata in verbose/debug mode
         if [ "$VERBOSE" = true ] || [ "$DEBUG" = true ]; then
             echo ""
@@ -1245,46 +1358,119 @@ Try again later or check Claude API status at https://status.anthropic.com"
             echo ""
         fi
 
-        # Check for completion promise
-        if echo "$claude_output" | grep -q "<promise>COMPLETE</promise>"; then
+        # Run criteria verification
+        local verify_result
+        verify_result=$(node lib/criteria/index.js verify --task-file "$JSON_FILE" --task-id "$next_task_id" 2>&1)
+        local verify_exit=$?
+
+        if [ "$DEBUG" = true ]; then
+            echo -e "${BLUE}[DEBUG] Criteria verification result: $verify_result${NC}"
+        fi
+
+        # Update per-criterion tracking in PRD JSON
+        local task_index=$(jq ".tasks | map(.id) | index(\"$next_task_id\")" "$JSON_FILE")
+        local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+        if [ "$verify_exit" -eq 0 ]; then
+            # All criteria passed — mark task complete
+            local updated_prd=$(jq \
+                --argjson idx "$task_index" \
+                --arg now "$now" \
+                --argjson results "$verify_result" \
+                '.tasks[$idx].passes = true |
+                 .tasks[$idx].completedAt = $now |
+                 .tasks[$idx].criteriaResults = $results.results' \
+                "$JSON_FILE")
+            echo "$updated_prd" | jq '.' > "$JSON_FILE"
+
+            log_iteration_result "$iteration" "$next_task_id" "PASSED" "All criteria verified"
+
             if [ "$VERBOSE" = true ]; then
-                echo -e "${GREEN}[INFO] Completion promise detected! Verifying all tasks...${NC}"
+                echo -e "${GREEN}[INFO] Task $next_task_id: All criteria passed!${NC}"
+            fi
+        else
+            # Some criteria failed — update results but keep passes=false
+            local updated_prd=$(jq \
+                --argjson idx "$task_index" \
+                --arg now "$now" \
+                --argjson results "$verify_result" \
+                '.tasks[$idx].criteriaResults = $results.results' \
+                "$JSON_FILE" 2>/dev/null || cat "$JSON_FILE")
+            echo "$updated_prd" | jq '.' > "$JSON_FILE" 2>/dev/null || true
+
+            log_iteration_result "$iteration" "$next_task_id" "IN PROGRESS" "Criteria verification: some failed"
+
+            if [ "$VERBOSE" = true ]; then
+                local pass_count=$(echo "$verify_result" | jq '[.results[] | select(.passed == true)] | length' 2>/dev/null || echo "?")
+                local total_count=$(echo "$verify_result" | jq '.results | length' 2>/dev/null || echo "?")
+                echo -e "${YELLOW}[INFO] Task $next_task_id: $pass_count/$total_count criteria passing${NC}"
             fi
 
-            # Verify that all tasks actually have passes=true
-            local all_tasks_passed=$(jq '[.tasks[] | select(.passes == false)] | length' "$JSON_FILE")
-
-            if [ "$all_tasks_passed" -eq 0 ]; then
-                # All tasks genuinely complete
-                completion_detected=true
-                log_iteration_result "$iteration" "$next_task_id" "COMPLETE" "All tasks passed"
-                log_learnings "All PRD tasks have been completed successfully."
-
-                if [ "$VERBOSE" = true ]; then
-                    echo -e "${GREEN}[INFO] Verification passed: All tasks completed!${NC}"
+            # Update per-criterion attempt tracking
+            local result_idx=0
+            local result_count=$(echo "$verify_result" | jq '.results | length' 2>/dev/null || echo "0")
+            while [ $result_idx -lt $result_count ]; do
+                local crit_passed=$(echo "$verify_result" | jq ".results[$result_idx].passed")
+                if [ "$crit_passed" = "false" ]; then
+                    local prev_attempts=$(jq ".tasks[$task_index].criteriaResults[$result_idx].attempts // 0" "$JSON_FILE")
+                    local new_attempts=$((prev_attempts + 1))
+                    local updated=$(jq \
+                        --argjson idx "$task_index" \
+                        --argjson cidx "$result_idx" \
+                        --argjson attempts "$new_attempts" \
+                        '.tasks[$idx].criteriaResults[$cidx].attempts = $attempts' \
+                        "$JSON_FILE")
+                    echo "$updated" | jq '.' > "$JSON_FILE"
+                else
+                    # Reset attempt counter on pass
+                    local updated=$(jq \
+                        --argjson idx "$task_index" \
+                        --argjson cidx "$result_idx" \
+                        '.tasks[$idx].criteriaResults[$cidx].attempts = 0' \
+                        "$JSON_FILE")
+                    echo "$updated" | jq '.' > "$JSON_FILE"
                 fi
-                break
-            else
-                # Some tasks still incomplete despite promise
-                if [ "$VERBOSE" = true ]; then
-                    echo -e "${YELLOW}[WARNING] Completion promise detected but $all_tasks_passed tasks still incomplete. Continuing...${NC}"
+                result_idx=$((result_idx + 1))
+            done
+
+            # Check for thrash
+            local thrash_criterion
+            if thrash_criterion=$(check_thrash "$next_task_id"); then
+                echo ""
+                echo -e "${YELLOW}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
+                echo -e "${YELLOW}║                          THRASH WARNING                                    ║${NC}"
+                echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
+                echo ""
+                echo -e "${YELLOW}Warning: Task $next_task_id has stalled: criterion $thrash_criterion has failed 4+${NC}"
+                echo -e "${YELLOW}  consecutive times with no progress on other criteria.${NC}"
+                echo -e "${YELLOW}  Consider: revising the criterion, splitting the task, or running --analyze-prd.${NC}"
+                echo ""
+                read -p "  Continue? [Y/n] " -n 1 -r
+                echo ""
+                if [[ $REPLY =~ ^[Nn]$ ]]; then
+                    echo -e "${RED}Stopping at user request.${NC}"
+                    log_iteration_result "$iteration" "$next_task_id" "STALLED" "User stopped after thrash warning on criterion $thrash_criterion"
+                    break
                 fi
-                log_iteration_result "$iteration" "$next_task_id" "IN PROGRESS" "Completion promise detected but tasks remain incomplete"
             fi
         fi
 
-        # Read updated PRD to check task status
-        local updated_task=$(get_task_details "$next_task_id")
-        local task_passes=$(echo "$updated_task" | jq -r '.passes')
-
-        if [ "$task_passes" = "true" ]; then
-            log_iteration_result "$iteration" "$next_task_id" "PASSED" "Task completed successfully"
-        else
-            log_iteration_result "$iteration" "$next_task_id" "IN PROGRESS" "Task still being worked on"
+        # Check if ALL tasks are now complete
+        local remaining=$(jq '[.tasks[] | select(.passes == false)] | length' "$JSON_FILE")
+        if [ "$remaining" -eq 0 ]; then
+            completion_detected=true
+            log_learnings "All PRD tasks have been completed successfully."
+            if [ "$VERBOSE" = true ]; then
+                echo -e "${GREEN}[INFO] All tasks completed!${NC}"
+            fi
+            break
         fi
 
         # Show progress visualization
         show_progress "$iteration" "$start_time"
+
+        # Clean up iteration snapshot
+        rm -f "${JSON_FILE}.pre-iteration"
 
         # Increment iteration
         iteration=$((iteration + 1))
