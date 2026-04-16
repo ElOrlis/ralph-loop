@@ -73,6 +73,8 @@ OPTIONS:
   --help                  Show this help message
   --dry-run               Show next prompt and exit (don't call Claude)
   --no-github             Disable all GitHub integration
+  --repo owner/name      Override target GitHub repository
+                          (default: PRD "repository" field or git remote origin)
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
