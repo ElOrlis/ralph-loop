@@ -13,6 +13,8 @@ RESUME=false
 ANALYZE_PRD=false
 DRY_RUN=false
 GITHUB_ENABLED=true
+REPO_OVERRIDE=""
+TARGET_REPO=""
 PRD_FILE=""
 JSON_FILE=""
 PROGRESS_FILE=""
@@ -242,6 +244,13 @@ parse_arguments() {
             --no-github)
                 GITHUB_ENABLED=false
                 shift
+                ;;
+            --repo)
+                if [ -z "${2:-}" ]; then
+                    error_exit "--repo requires an argument in owner/name format" "Example: ./ralph-loop my-prd.md --repo myorg/myrepo"
+                fi
+                REPO_OVERRIDE="$2"
+                shift 2
                 ;;
             -*)
                 error_exit "Unknown option: $1" "Run './ralph-loop --help' to see all available options."
@@ -555,6 +564,35 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
     fi
 
     return 0
+}
+
+# Resolve target GitHub repository
+resolve_target_repo() {
+    if [ "$GITHUB_ENABLED" = false ]; then
+        return 0
+    fi
+
+    local resolve_args="--task-file \"$JSON_FILE\""
+    if [ -n "$REPO_OVERRIDE" ]; then
+        resolve_args="--repo \"$REPO_OVERRIDE\" $resolve_args"
+    fi
+
+    local resolve_result
+    resolve_result=$(eval node lib/github/index.js resolve-repo $resolve_args 2>&1)
+    local resolve_exit=$?
+
+    if [ $resolve_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] GitHub repo resolution failed: $resolve_result${NC}"
+        echo -e "${YELLOW}[WARN] Disabling GitHub integration for this run. Use --repo or add 'repository' to PRD.${NC}"
+        GITHUB_ENABLED=false
+        return 0
+    fi
+
+    TARGET_REPO=$(echo "$resolve_result" | jq -r '.repo')
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Target GitHub repo: $TARGET_REPO${NC}"
+    fi
 }
 
 # Analyze PRD quality using Claude API
@@ -1598,6 +1636,9 @@ main() {
     # Validate PRD JSON structure
     validate_prd_json "$JSON_FILE"
     echo -e "${GREEN}✓${NC} PRD validation passed"
+
+    # Resolve GitHub repository
+    resolve_target_repo
 
     # If analyze mode, run analysis and exit
     if [ "$ANALYZE_PRD" = true ]; then
