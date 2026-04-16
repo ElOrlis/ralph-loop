@@ -1113,6 +1113,57 @@ check_thrash() {
     return 1  # No thrash
 }
 
+# Create GitHub issue for a task if one doesn't exist
+ensure_task_issue() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$GITHUB_ENABLED" = false ]; then
+        return 0
+    fi
+
+    # Check if task already has an issueNumber
+    local existing_issue=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+    if [ -n "$existing_issue" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] Task $task_id already has issue #$existing_issue${NC}"
+        fi
+        return 0
+    fi
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Creating GitHub issue for $task_id...${NC}"
+    fi
+
+    local task_json=$(jq -c ".tasks[$task_index]" "$JSON_FILE")
+    local create_result
+    create_result=$(node lib/github/index.js create-issue \
+        --repo "$TARGET_REPO" \
+        --task "$task_json" 2>&1)
+    local create_exit=$?
+
+    if [ $create_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Failed to create issue for $task_id: $create_result${NC}"
+        return 0  # Non-fatal — continue without issue
+    fi
+
+    local issue_number=$(echo "$create_result" | jq -r '.issueNumber')
+    local issue_url=$(echo "$create_result" | jq -r '.issueUrl')
+
+    # Write issueNumber and issueUrl back to PRD JSON
+    local updated_prd=$(jq \
+        --argjson idx "$task_index" \
+        --argjson num "$issue_number" \
+        --arg url "$issue_url" \
+        '.tasks[$idx].issueNumber = $num | .tasks[$idx].issueUrl = $url' \
+        "$JSON_FILE")
+    echo "$updated_prd" | jq '.' > "$JSON_FILE"
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${GREEN}[INFO] Created issue #$issue_number: $issue_url${NC}"
+    fi
+}
+
 # Run the main Ralph Loop
 run_ralph_loop() {
     echo ""
@@ -1170,6 +1221,12 @@ run_ralph_loop() {
 
         # Update task attempts
         update_task_attempts "$next_task_id"
+
+        # Get task index (needed for issue creation and later updates)
+        local task_index=$(jq ".tasks | map(.id) | index(\"$next_task_id\")" "$JSON_FILE")
+
+        # Create GitHub issue if needed
+        ensure_task_issue "$next_task_id" "$task_index"
 
         # Log iteration start
         log_iteration "$iteration" "$next_task_id" "$task_title"
@@ -1406,7 +1463,6 @@ Try again later or check Claude API status at https://status.anthropic.com"
         fi
 
         # Update per-criterion tracking in PRD JSON
-        local task_index=$(jq ".tasks | map(.id) | index(\"$next_task_id\")" "$JSON_FILE")
         local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
         if [ "$verify_exit" -eq 0 ]; then
