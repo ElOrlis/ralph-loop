@@ -1198,6 +1198,40 @@ post_iteration_comment() {
     }
 }
 
+# Close the GitHub issue when a task completes
+close_task_issue() {
+    local task_id="$1"
+    local task_index="$2"
+    local iterations_used="$3"
+
+    if [ "$GITHUB_ENABLED" = false ]; then
+        return 0
+    fi
+
+    local issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+    if [ -z "$issue_number" ]; then
+        return 0
+    fi
+
+    local task_title=$(jq -r ".tasks[$task_index].title" "$JSON_FILE")
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Closing issue #$issue_number (task complete)...${NC}"
+    fi
+
+    node lib/github/index.js close-issue \
+        --repo "$TARGET_REPO" \
+        --issue "$issue_number" \
+        --task-title "$task_title" \
+        --iterations-used "$iterations_used" 2>&1 || {
+        echo -e "${YELLOW}[WARN] Failed to close issue #$issue_number${NC}"
+    }
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${GREEN}[INFO] Issue #$issue_number closed${NC}"
+    fi
+}
+
 # Run the main Ralph Loop
 run_ralph_loop() {
     echo ""
@@ -1515,6 +1549,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
 
             # Post iteration comment to GitHub issue
             post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result"
+
+            # Close the GitHub issue
+            close_task_issue "$next_task_id" "$task_index" "$iteration"
 
             if [ "$VERBOSE" = true ]; then
                 echo -e "${GREEN}[INFO] Task $next_task_id: All criteria passed!${NC}"
