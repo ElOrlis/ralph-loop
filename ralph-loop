@@ -1164,6 +1164,40 @@ ensure_task_issue() {
     fi
 }
 
+# Post iteration results as a comment on the task's GitHub issue
+post_iteration_comment() {
+    local task_id="$1"
+    local task_index="$2"
+    local current_iteration="$3"
+    local verify_result="$4"
+
+    if [ "$GITHUB_ENABLED" = false ]; then
+        return 0
+    fi
+
+    local issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+    if [ -z "$issue_number" ]; then
+        return 0  # No issue to update
+    fi
+
+    local criteria_json=$(jq -c ".tasks[$task_index].acceptanceCriteria" "$JSON_FILE")
+    local results_json=$(echo "$verify_result" | jq -c '.results')
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Posting iteration comment to issue #$issue_number...${NC}"
+    fi
+
+    node lib/github/index.js update-issue \
+        --repo "$TARGET_REPO" \
+        --issue "$issue_number" \
+        --iteration "$current_iteration" \
+        --max-iterations "$MAX_ITERATIONS" \
+        --results "$results_json" \
+        --criteria "$criteria_json" 2>&1 || {
+        echo -e "${YELLOW}[WARN] Failed to post comment to issue #$issue_number${NC}"
+    }
+}
+
 # Run the main Ralph Loop
 run_ralph_loop() {
     echo ""
@@ -1479,6 +1513,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
 
             log_iteration_result "$iteration" "$next_task_id" "PASSED" "All criteria verified"
 
+            # Post iteration comment to GitHub issue
+            post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result"
+
             if [ "$VERBOSE" = true ]; then
                 echo -e "${GREEN}[INFO] Task $next_task_id: All criteria passed!${NC}"
             fi
@@ -1526,6 +1563,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
                 fi
                 result_idx=$((result_idx + 1))
             done
+
+            # Post iteration comment to GitHub issue
+            post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
             # Check for thrash
             local thrash_criterion
