@@ -196,7 +196,8 @@ echo "Test 1: Extract last iteration from progress file"
 setup_test_env
 
 # Source the ralph-loop script to get the function
-RALPH_SCRIPT="/Users/paul.lovvik/AI/Claude/ralph/ralph-loop"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RALPH_SCRIPT="$SCRIPT_DIR/../ralph-loop"
 if [ ! -f "$RALPH_SCRIPT" ]; then
     fail_test "Test 1" "Ralph loop script not found at $RALPH_SCRIPT"
 else

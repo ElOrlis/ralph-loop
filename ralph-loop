@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# Resolve the directory containing this script so lib/ lookups work regardless of CWD
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Default values
 MAX_ITERATIONS=15
 VERBOSE=false
@@ -580,8 +583,8 @@ resolve_target_repo() {
     fi
 
     local resolve_result
-    resolve_result=$(eval node lib/github/index.js resolve-repo $resolve_args 2>&1)
-    local resolve_exit=$?
+    local resolve_exit=0
+    resolve_result=$(eval node "$SCRIPT_DIR/lib/github/index.js" resolve-repo $resolve_args 2>&1) || resolve_exit=$?
 
     if [ $resolve_exit -ne 0 ]; then
         echo -e "${YELLOW}[WARN] GitHub repo resolution failed: $resolve_result${NC}"
@@ -857,6 +860,12 @@ prompt_resume_or_fresh() {
 initialize_progress_file() {
     local prd_dir=$(dirname "$JSON_FILE")
     local progress_file="${prd_dir}/progress.txt"
+
+    # --dry-run must not write any files or prompt the user
+    if [ "$DRY_RUN" = true ]; then
+        PROGRESS_FILE="$progress_file"
+        return 0
+    fi
 
     # If progress file exists and resume flag not specified, prompt user
     if [ -f "$progress_file" ] && [ "$RESUME" = false ]; then
@@ -1163,6 +1172,11 @@ ensure_task_issue() {
         return 0
     fi
 
+    # --dry-run must not cause GitHub side effects
+    if [ "$DRY_RUN" = true ]; then
+        return 0
+    fi
+
     # Check if task already has an issueNumber
     local existing_issue=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
     if [ -n "$existing_issue" ]; then
@@ -1178,10 +1192,10 @@ ensure_task_issue() {
 
     local task_json=$(jq -c ".tasks[$task_index]" "$JSON_FILE")
     local create_result
-    create_result=$(node lib/github/index.js create-issue \
+    local create_exit=0
+    create_result=$(node "$SCRIPT_DIR/lib/github/index.js" create-issue \
         --repo "$TARGET_REPO" \
-        --task "$task_json" 2>&1)
-    local create_exit=$?
+        --task "$task_json" 2>&1) || create_exit=$?
 
     if [ $create_exit -ne 0 ]; then
         echo -e "${YELLOW}[WARN] Failed to create issue for $task_id: $create_result${NC}"
@@ -1228,7 +1242,7 @@ post_iteration_comment() {
         echo -e "${BLUE}[INFO] Posting iteration comment to issue #$issue_number...${NC}"
     fi
 
-    node lib/github/index.js update-issue \
+    node "$SCRIPT_DIR/lib/github/index.js" update-issue \
         --repo "$TARGET_REPO" \
         --issue "$issue_number" \
         --iteration "$current_iteration" \
@@ -1260,7 +1274,7 @@ close_task_issue() {
         echo -e "${BLUE}[INFO] Closing issue #$issue_number (task complete)...${NC}"
     fi
 
-    node lib/github/index.js close-issue \
+    node "$SCRIPT_DIR/lib/github/index.js" close-issue \
         --repo "$TARGET_REPO" \
         --issue "$issue_number" \
         --task-title "$task_title" \
@@ -1331,37 +1345,25 @@ run_ralph_loop() {
         local task_details=$(get_task_details "$next_task_id")
         local task_title=$(echo "$task_details" | jq -r '.title')
 
-        # Update task attempts
-        update_task_attempts "$next_task_id"
-
         # Get task index (needed for issue creation and later updates)
         local task_index=$(jq ".tasks | map(.id) | index(\"$next_task_id\")" "$JSON_FILE")
-
-        # Create GitHub issue if needed
-        ensure_task_issue "$next_task_id" "$task_index"
-
-        # Log iteration start
-        log_iteration "$iteration" "$next_task_id" "$task_title"
-
-        if [ "$VERBOSE" = true ]; then
-            echo -e "${BLUE}[INFO] Working on: $next_task_id - $task_title${NC}"
-        fi
 
         # Generate Claude prompt via prompt builder
         local json_basename=$(basename "$JSON_FILE")
         local progress_basename=$(basename "$PROGRESS_FILE")
         local claude_prompt
-        claude_prompt=$(node lib/prompt/index.js build \
+        local prompt_exit=0
+        claude_prompt=$(node "$SCRIPT_DIR/lib/prompt/index.js" build \
             --task-file "$JSON_FILE" \
             --task-id "$next_task_id" \
             --json-file "$json_basename" \
-            --progress-file "$progress_basename" 2>&1)
+            --progress-file "$progress_basename" 2>&1) || prompt_exit=$?
 
-        if [ $? -ne 0 ]; then
+        if [ $prompt_exit -ne 0 ]; then
             error_exit "Failed to build prompt for task $next_task_id" "Check lib/prompt/ module. Error: $claude_prompt"
         fi
 
-        # --dry-run: show prompt and exit
+        # --dry-run: show prompt and exit without side effects
         if [ "$DRY_RUN" = true ]; then
             echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
             echo -e "${BLUE}║                         DRY RUN — PROMPT PREVIEW                           ║${NC}"
@@ -1373,8 +1375,21 @@ run_ralph_loop() {
             echo "$claude_prompt"
             echo "────────────────────────────────────────────────────────────────────────────"
             echo ""
-            echo -e "${YELLOW}Dry run complete. No API call made.${NC}"
+            echo -e "${YELLOW}Dry run complete. No request was sent to Claude.${NC}"
             exit 0
+        fi
+
+        # Update task attempts
+        update_task_attempts "$next_task_id"
+
+        # Create GitHub issue if needed
+        ensure_task_issue "$next_task_id" "$task_index"
+
+        # Log iteration start
+        log_iteration "$iteration" "$next_task_id" "$task_title"
+
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] Working on: $next_task_id - $task_title${NC}"
         fi
 
         if [ "$DEBUG" = true ]; then
@@ -1510,8 +1525,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
 
         # Validate JSON wasn't corrupted by Claude
         local json_valid
-        json_valid=$(node lib/criteria/index.js validate-json --file "$JSON_FILE" 2>&1)
-        if [ $? -ne 0 ]; then
+        local json_valid_exit=0
+        json_valid=$(node "$SCRIPT_DIR/lib/criteria/index.js" validate-json --file "$JSON_FILE" 2>&1) || json_valid_exit=$?
+        if [ $json_valid_exit -ne 0 ]; then
             echo -e "${YELLOW}⚠ JSON file corrupted during iteration. Restoring from snapshot.${NC}"
             cp "${JSON_FILE}.pre-iteration" "$JSON_FILE"
             log_iteration_result "$iteration" "$next_task_id" "FAILED" "JSON corrupted, restored from snapshot"
@@ -1567,8 +1583,8 @@ Try again later or check Claude API status at https://status.anthropic.com"
 
         # Run criteria verification
         local verify_result
-        verify_result=$(node lib/criteria/index.js verify --task-file "$JSON_FILE" --task-id "$next_task_id" 2>&1)
-        local verify_exit=$?
+        local verify_exit=0
+        verify_result=$(node "$SCRIPT_DIR/lib/criteria/index.js" verify --task-file "$JSON_FILE" --task-id "$next_task_id" 2>&1) || verify_exit=$?
 
         if [ "$DEBUG" = true ]; then
             echo -e "${BLUE}[DEBUG] Criteria verification result: $verify_result${NC}"

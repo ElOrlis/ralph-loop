@@ -19,6 +19,9 @@ SUITES_FAILED=0
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# cd into the tests directory so individual suites that use ../ralph-loop resolve correctly
+cd "$SCRIPT_DIR"
+
 echo "╔════════════════════════════════════════════════════════════════════════════╗"
 echo "║                        RALPH LOOP TEST SUITE                               ║"
 echo "╚════════════════════════════════════════════════════════════════════════════╝"
