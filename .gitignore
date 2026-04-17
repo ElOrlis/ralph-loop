@@ -52,3 +52,6 @@ Thumbs.db
 coverage/
 .nyc_output/
 *.lcov
+
+# Git worktrees
+.worktrees/
