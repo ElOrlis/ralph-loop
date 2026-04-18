@@ -18,6 +18,9 @@ DRY_RUN=false
 GITHUB_ENABLED=true
 REPO_OVERRIDE=""
 TARGET_REPO=""
+GITHUB_API_CALLS=0
+GITHUB_API_WARN_THRESHOLD=100
+GITHUB_API_WARNED=false
 PRD_FILE=""
 JSON_FILE=""
 PROGRESS_FILE=""
@@ -597,6 +600,33 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
     return 0
 }
 
+# Args: $1 = JSON reply containing optional .apiCalls field
+bump_github_api_calls() {
+    local reply="$1"
+    local delta
+    delta=$(echo "$reply" | jq -r '.apiCalls // 0' 2>/dev/null || echo 0)
+    if [[ "$delta" =~ ^[0-9]+$ ]] && [ "$delta" -gt 0 ]; then
+        GITHUB_API_CALLS=$((GITHUB_API_CALLS + delta))
+    fi
+    if [ "$GITHUB_API_WARNED" = false ] && [ "$GITHUB_API_CALLS" -ge "$GITHUB_API_WARN_THRESHOLD" ]; then
+        echo -e "${YELLOW}[WARN] GitHub API calls this run: $GITHUB_API_CALLS (threshold: $GITHUB_API_WARN_THRESHOLD). Projects v2 / issue traffic is high.${NC}"
+        GITHUB_API_WARNED=true
+        emit_logging_event project_rate_limit_warning "{\"callCount\":$GITHUB_API_CALLS,\"threshold\":$GITHUB_API_WARN_THRESHOLD}"
+    fi
+}
+
+# Args: $1 = event name, $2 = JSON object payload (without ts/event)
+emit_logging_event() {
+    local event="$1"
+    local payload="$2"
+    local log_cli="$SCRIPT_DIR/lib/logging/index.js"
+    if [ ! -f "$log_cli" ]; then return 0; fi
+    local ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local merged
+    merged=$(echo "$payload" | jq --arg ts "$ts" --arg event "$event" '. + {ts:$ts, event:$event}')
+    node "$log_cli" append --file "$PROGRESS_FILE" --event "$merged" >/dev/null 2>&1 || true
+}
+
 # Resolve target GitHub repository
 resolve_target_repo() {
     if [ "$GITHUB_ENABLED" = false ]; then
@@ -624,6 +654,62 @@ resolve_target_repo() {
     if [ "$VERBOSE" = true ]; then
         echo -e "${BLUE}[INFO] Target GitHub repo: $TARGET_REPO${NC}"
     fi
+}
+
+ensure_github_project() {
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+
+    local existing
+    existing=$(jq -r '.githubProject.number // empty' "$JSON_FILE")
+    if [ -n "$existing" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] GitHub project already configured: #$existing${NC}"
+        fi
+        return 0
+    fi
+
+    local prd_title
+    prd_title=$(jq -r '.title // "Ralph Loop PRD"' "$JSON_FILE")
+    local categories_csv
+    categories_csv=$(jq -r '[.tasks[].category] | unique | join(",")' "$JSON_FILE")
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Creating GitHub project for PRD: $prd_title${NC}"
+    fi
+
+    local create_result
+    local create_exit=0
+    create_result=$(node "$SCRIPT_DIR/lib/github/index.js" create-project \
+        --repo "$TARGET_REPO" \
+        --title "$prd_title" \
+        --categories "$categories_csv" 2>&1) || create_exit=$?
+
+    if [ $create_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Failed to create GitHub project: $create_result${NC}"
+        echo -e "${YELLOW}[WARN] Continuing without project board. Check 'gh auth status' and 'project' scope.${NC}"
+        return 0
+    fi
+
+    bump_github_api_calls "$create_result"
+
+    local gp_json
+    gp_json=$(echo "$create_result" | jq '.githubProject')
+    local updated
+    updated=$(jq --argjson gp "$gp_json" '.githubProject = $gp' "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+
+    local project_number project_id project_url
+    project_number=$(echo "$gp_json" | jq -r '.number')
+    project_id=$(echo "$gp_json" | jq -r '.id')
+    project_url=$(echo "$gp_json" | jq -r '.url')
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${GREEN}[INFO] Created project #$project_number at $project_url${NC}"
+    fi
+
+    emit_logging_event project_created \
+        "{\"projectNumber\":$project_number,\"projectId\":\"$project_id\",\"url\":\"$project_url\",\"fieldCount\":5}"
 }
 
 # On resume, cross-check task issue states for consistency
@@ -1858,6 +1944,7 @@ main() {
 
     # Resolve GitHub repository
     resolve_target_repo
+    ensure_github_project
 
     # If analyze mode, run analysis and exit
     if [ "$ANALYZE_PRD" = true ]; then
