@@ -338,6 +338,52 @@ EOF
     fi
 }
 
+# Test 9: githubProject requires all required fields
+test_githubproject_requires_all_fields() {
+    echo ""
+    echo "Test 9: githubProject requires all required fields"
+
+    cat > "$TEST_DIR/githubproject-partial.json" << 'EOF'
+{
+  "title": "t",
+  "githubProject": { "number": 1 },
+  "tasks": [
+    {
+      "id": "t1", "title": "x", "category": "c",
+      "priority": 1, "passes": false,
+      "acceptanceCriteria": ["a"]
+    }
+  ]
+}
+EOF
+
+    ../ralph-loop "$TEST_DIR/githubproject-partial.json" --analyze-prd > "$TEST_DIR/output9a.txt" 2>&1 || true
+
+    if grep -q "missing required field" "$TEST_DIR/output9a.txt"; then
+        pass "Detects githubProject missing required fields"
+    else
+        fail "expected missing-field error for incomplete githubProject"
+    fi
+}
+
+# Test 10: task projectItemId must be a string
+test_projectitem_id_must_be_string() {
+    echo ""
+    echo "Test 10: task projectItemId must be a string"
+
+    cat > "$TEST_DIR/projectitemid-number.json" << 'EOF'
+{ "title": "t", "tasks": [{ "id": "t1", "title": "x", "category": "c", "priority": 1, "passes": false, "acceptanceCriteria": ["a"], "projectItemId": 123 }] }
+EOF
+
+    ../ralph-loop "$TEST_DIR/projectitemid-number.json" > "$TEST_DIR/output10.txt" 2>&1 || true
+
+    if grep -q "non-string projectItemId" "$TEST_DIR/output10.txt"; then
+        pass "Detects non-string projectItemId"
+    else
+        fail "expected projectItemId error for numeric projectItemId"
+    fi
+}
+
 # Main test execution
 main() {
     echo "========================================"
@@ -354,6 +400,8 @@ main() {
     test_exit_code
     test_valid_prd
     test_priority_type
+    test_githubproject_requires_all_fields
+    test_projectitem_id_must_be_string
 
     cleanup
 

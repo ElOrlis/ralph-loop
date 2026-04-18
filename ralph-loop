@@ -568,6 +568,32 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
         echo -e "${GREEN}✓${NC} PRD validation passed: $task_count tasks validated"
     fi
 
+    # Optional: githubProject must be object with number, id, owner, ownerType, url, fieldIds
+    if jq -e '.githubProject' "$json_file" >/dev/null 2>&1; then
+        local gp_fields
+        for gp_fields in number id owner ownerType url fieldIds; do
+            if ! jq -e ".githubProject.$gp_fields" "$json_file" >/dev/null 2>&1; then
+                echo -e "${RED}[ERROR] githubProject missing required field: $gp_fields${NC}"
+                return 1
+            fi
+        done
+        local expected_fids="priority category iterationCount criteriaPassRate ralphStatus"
+        local fid
+        for fid in $expected_fids; do
+            if ! jq -e ".githubProject.fieldIds.$fid.id" "$json_file" >/dev/null 2>&1; then
+                echo -e "${YELLOW}[WARN] githubProject.fieldIds.$fid.id missing — will be repaired by --resume${NC}"
+            fi
+        done
+    fi
+
+    # Optional: each task.projectItemId (if present) must be string
+    local projitem_bad
+    projitem_bad=$(jq -r '.tasks[] | select(.projectItemId != null) | select((.projectItemId | type) != "string") | .id' "$json_file")
+    if [ -n "$projitem_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with non-string projectItemId: $projitem_bad${NC}"
+        return 1
+    fi
+
     return 0
 }
 
