@@ -1017,6 +1017,72 @@ restore_working_tree() {
     fi
 }
 
+# Commit the current working tree for this iteration with Ralph trailers.
+# Args: $1=task_id $2=task_index $3=iteration $4=verify_result_json $5=ralph_status
+# ralph_status must be one of: in-progress | passed | failed
+commit_iteration() {
+    local task_id="$1"
+    local task_index="$2"
+    local iteration="$3"
+    local verify_result="$4"
+    local ralph_status="$5"
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+
+    local task_title
+    task_title=$(jq -r ".tasks[$task_index].title" "$JSON_FILE")
+    local issue_number
+    issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+
+    local pass_count=0
+    local total_count=0
+    if [ -n "$verify_result" ]; then
+        pass_count=$(echo "$verify_result" | jq '[.results[] | select(.passed == true)] | length' 2>/dev/null || echo 0)
+        total_count=$(echo "$verify_result" | jq '.results | length' 2>/dev/null || echo 0)
+    fi
+
+    local args=(
+        commit-iteration
+        --task-id "$task_id"
+        --task-title "$task_title"
+        --iteration "$iteration"
+        --max-iterations "$MAX_ITERATIONS"
+        --pass-count "$pass_count"
+        --total-count "$total_count"
+        --status "$ralph_status"
+        --skip-if-empty
+    )
+    if [ -n "$issue_number" ]; then
+        args+=(--issue "$issue_number")
+    fi
+
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/git/index.js" "${args[@]}" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] commit-iteration failed for $task_id: $reply${NC}"
+        return 0
+    fi
+
+    local sha skipped
+    sha=$(echo "$reply" | jq -r '.sha')
+    skipped=$(echo "$reply" | jq -r '.skipped')
+    if [ "$skipped" = "true" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] Nothing to commit for iter $iteration on $task_id${NC}"
+        fi
+        return 0
+    fi
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${GREEN}[INFO] Committed ${sha:0:7} on $CURRENT_TASK_BRANCH (status: $ralph_status)${NC}"
+    fi
+
+    emit_logging_event iteration_committed \
+        "{\"iteration\":$iteration,\"taskId\":\"$task_id\",\"branchName\":\"$CURRENT_TASK_BRANCH\",\"sha\":\"$sha\",\"ralphStatus\":\"$ralph_status\",\"criteriaPassCount\":$pass_count,\"criteriaTotal\":$total_count}"
+}
+
 # On resume, cross-check task issue states for consistency
 crosscheck_issues() {
     if [ "$GITHUB_ENABLED" = false ]; then

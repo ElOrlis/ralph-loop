@@ -62,12 +62,19 @@ test_snapshot_and_branch_functions_exist() {
     done
 }
 
+test_commit_iteration_defined() {
+    echo ""; echo "Test: ralph-loop defines commit_iteration"
+    if grep -q "^commit_iteration()" "$RALPH_LOOP"; then pass "defines commit_iteration"
+    else fail "missing function commit_iteration"; fi
+}
+
 setup
 trap cleanup EXIT
 test_no_branch_flag_parses
 test_help_documents_no_branch
 test_no_github_implies_no_branch
 test_snapshot_and_branch_functions_exist
+test_commit_iteration_defined
 
 echo ""
 echo "────────────────────────────────────────────────"
