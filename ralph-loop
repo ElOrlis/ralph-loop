@@ -856,6 +856,11 @@ capture_original_branch() {
         return 0
     fi
     ORIGINAL_BRANCH=$(echo "$current" | jq -r '.branch')
+    if [ -z "$ORIGINAL_BRANCH" ] || [ "$ORIGINAL_BRANCH" = "null" ]; then
+        echo -e "${YELLOW}[WARN] current-branch returned empty/null. Disabling branching.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
 
     local prd_base
     prd_base=$(basename "$PRD_FILE")
@@ -901,6 +906,7 @@ git_branching_preflight() {
 snapshot_working_tree() {
     if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
 
+    STASH_APPLIED=false
     local dirty_reply
     dirty_reply=$(node "$SCRIPT_DIR/lib/git/index.js" has-uncommitted 2>&1) || return 0
     local dirty
@@ -920,8 +926,6 @@ snapshot_working_tree() {
         if [ "$VERBOSE" = true ] && [ "$stashed" = "true" ]; then
             echo -e "${BLUE}[INFO] Stashed uncommitted changes before branch switch${NC}"
         fi
-    else
-        STASH_APPLIED=false
     fi
 }
 
@@ -956,6 +960,10 @@ ensure_task_branch() {
             return 0
         }
         branch_name=$(echo "$name_reply" | jq -r '.branchName')
+        if [ -z "$branch_name" ] || [ "$branch_name" = "null" ]; then
+            echo -e "${YELLOW}[WARN] branch-name returned empty/null for $task_id; skipping branch creation.${NC}"
+            return 0
+        fi
         local updated
         updated=$(jq --argjson idx "$task_index" --arg n "$branch_name" \
             '.tasks[$idx].branchName = $n' "$JSON_FILE")
