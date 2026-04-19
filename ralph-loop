@@ -1331,6 +1331,57 @@ ensure_task_issue() {
     fi
 }
 
+ensure_project_item() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+
+    local project_id
+    project_id=$(jq -r '.githubProject.id // empty' "$JSON_FILE")
+    if [ -z "$project_id" ]; then return 0; fi
+
+    local existing_item
+    existing_item=$(jq -r ".tasks[$task_index].projectItemId // empty" "$JSON_FILE")
+    if [ -n "$existing_item" ]; then return 0; fi
+
+    local issue_number
+    issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+    if [ -z "$issue_number" ]; then
+        echo -e "${YELLOW}[WARN] Cannot add project item for $task_id: no issueNumber.${NC}"
+        return 0
+    fi
+
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" ensure-project-item \
+        --repo "$TARGET_REPO" \
+        --project-id "$project_id" \
+        --issue "$issue_number" 2>&1) || reply_exit=$?
+
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Failed to add $task_id (issue #$issue_number) to project: $reply${NC}"
+        return 0
+    fi
+
+    bump_github_api_calls "$reply"
+
+    local item_id
+    item_id=$(echo "$reply" | jq -r '.projectItemId')
+    local updated
+    updated=$(jq \
+        --argjson idx "$task_index" \
+        --arg id "$item_id" \
+        '.tasks[$idx].projectItemId = $id' \
+        "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Added $task_id (issue #$issue_number) to project as $item_id${NC}"
+    fi
+}
+
 # Post iteration results as a comment on the task's GitHub issue
 post_iteration_comment() {
     local task_id="$1"
@@ -1496,6 +1547,9 @@ run_ralph_loop() {
 
         # Create GitHub issue if needed
         ensure_task_issue "$next_task_id" "$task_index"
+
+        # Ensure this task is in the GitHub project
+        ensure_project_item "$next_task_id" "$task_index"
 
         # Log iteration start
         log_iteration "$iteration" "$next_task_id" "$task_title"
