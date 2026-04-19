@@ -75,9 +75,11 @@ lib/
     schema.js           # Parse inline type hints, normalize string->object, validate
     runner.js           # Execute criteria (shell, http, file-exists, grep, manual)
   github/
-    index.js            # CLI: resolve-repo | create-issue | update-issue | close-issue
+    index.js            # CLI: resolve-repo | create-issue | update-issue | close-issue | create-project | ensure-project-item | sync-project-item | validate-project | repair-project-fields
     repo.js             # Resolve target repo (CLI flag > PRD field > git remote)
     issues.js           # Create/update/close issues, format iteration comment tables
+    graphql.js          # gh api graphql wrapper + call counting
+    projects.js         # Projects v2: project/field/item lifecycle + conflict detection
 ```
 
 **Criteria types:** `shell` (exit code), `http` (status code), `file-exists`, `grep` (regex in file), `manual` (skipped)
@@ -106,3 +108,5 @@ A small Node.js component with SQLite (demo artifacts, not part of the main tool
 - All Bash test scripts must be executable (`chmod +x`)
 - Node.js modules use CommonJS (`require`/`module.exports`) and Jest for testing
 - Dependencies: Bash 4.0+, `jq` 1.6+, `gh` CLI (for GitHub integration), Claude CLI, Node.js, standard Unix utilities
+- Ralph tracks GitHub API calls per run (GITHUB_API_CALLS global) and warns at 100 calls.
+- PRD JSON root may contain `githubProject` (project metadata + field IDs); each task may contain `projectItemId`. Both optional and populated automatically.

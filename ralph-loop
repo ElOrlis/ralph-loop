@@ -82,6 +82,13 @@ OPTIONS:
   --repo owner/name      Override target GitHub repository
                           (default: PRD "repository" field or git remote origin)
 
+  GitHub Projects v2 (Phase 4):
+    Each PRD gets a dedicated GitHub project. Ralph creates it on first run
+    (requires 'project' scope: gh auth refresh -s project,read:project,write:project)
+    and syncs Priority, Category, Iteration Count, Criteria Pass Rate, and
+    Ralph Status fields after every iteration. GitHub API calls are reported
+    at end of run; a warning prints at 100 calls.
+
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
 ╚════════════════════════════════════════════════════════════════════════════╝
