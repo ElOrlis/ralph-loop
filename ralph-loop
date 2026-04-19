@@ -604,6 +604,41 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
         return 1
     fi
 
+    # Optional: ralphGitMeta must be object with originalBranch (string) + prdSlug (string)
+    if jq -e '.ralphGitMeta' "$json_file" >/dev/null 2>&1; then
+        local gm_fields
+        for gm_fields in originalBranch prdSlug; do
+            if ! jq -e ".ralphGitMeta.$gm_fields | type == \"string\"" "$json_file" >/dev/null 2>&1; then
+                echo -e "${RED}[ERROR] ralphGitMeta.$gm_fields must be a string${NC}"
+                return 1
+            fi
+        done
+    fi
+
+    # Optional: each task.branchName (if present) must be non-empty string
+    local branch_bad
+    branch_bad=$(jq -r '.tasks[] | select(.branchName != null) | select((.branchName | type) != "string" or (.branchName | length) == 0) | .id' "$json_file")
+    if [ -n "$branch_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with invalid branchName: $branch_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.prNumber (if present) must be a positive integer
+    local pr_bad
+    pr_bad=$(jq -r '.tasks[] | select(.prNumber != null) | select((.prNumber | type) != "number" or .prNumber <= 0 or (.prNumber | floor) != .prNumber) | .id' "$json_file")
+    if [ -n "$pr_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with invalid prNumber: $pr_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.prUrl (if present) must be string
+    local prurl_bad
+    prurl_bad=$(jq -r '.tasks[] | select(.prUrl != null) | select((.prUrl | type) != "string") | .id' "$json_file")
+    if [ -n "$prurl_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with non-string prUrl: $prurl_bad${NC}"
+        return 1
+    fi
+
     return 0
 }
 
