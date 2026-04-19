@@ -712,6 +712,72 @@ ensure_github_project() {
         "{\"projectNumber\":$project_number,\"projectId\":\"$project_id\",\"url\":\"$project_url\",\"fieldCount\":5}"
 }
 
+validate_project_fields() {
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    local project_id
+    project_id=$(jq -r '.githubProject.id // empty' "$JSON_FILE")
+    if [ -z "$project_id" ]; then return 0; fi
+
+    local project_json
+    project_json=$(jq '.githubProject' "$JSON_FILE")
+
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" validate-project \
+        --project "$project_json" 2>&1) || reply_exit=$?
+
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Could not validate project fields on resume: $reply${NC}"
+        return 0
+    fi
+
+    bump_github_api_calls "$reply"
+
+    local ok
+    ok=$(echo "$reply" | jq -r '.ok')
+    local updated_field_ids
+    updated_field_ids=$(echo "$reply" | jq '.updatedFieldIds')
+
+    # Always refresh fieldIds in case options shifted
+    local updated_prd
+    updated_prd=$(jq --argjson fids "$updated_field_ids" '.githubProject.fieldIds = $fids' "$JSON_FILE")
+    echo "$updated_prd" | jq '.' > "$JSON_FILE"
+
+    if [ "$ok" != "true" ]; then
+        local missing_csv
+        missing_csv=$(echo "$reply" | jq -r '.missing | join(",")')
+        echo -e "${YELLOW}[WARN] Missing project fields on resume: $missing_csv. Attempting repair...${NC}"
+
+        local categories_csv
+        categories_csv=$(jq -r '[.tasks[].category] | unique | join(",")' "$JSON_FILE")
+        local refreshed_project
+        refreshed_project=$(jq '.githubProject' "$JSON_FILE")
+
+        local repair_reply
+        local repair_exit=0
+        repair_reply=$(node "$SCRIPT_DIR/lib/github/index.js" repair-project-fields \
+            --project "$refreshed_project" \
+            --missing "$missing_csv" \
+            --categories "$categories_csv" 2>&1) || repair_exit=$?
+
+        if [ $repair_exit -ne 0 ]; then
+            echo -e "${YELLOW}[WARN] Repair failed: $repair_reply${NC}"
+            return 0
+        fi
+
+        bump_github_api_calls "$repair_reply"
+
+        local repaired_fids
+        repaired_fids=$(echo "$repair_reply" | jq '.fieldIds')
+        updated_prd=$(jq --argjson fids "$repaired_fids" '.githubProject.fieldIds = $fids' "$JSON_FILE")
+        echo "$updated_prd" | jq '.' > "$JSON_FILE"
+
+        echo -e "${GREEN}[INFO] Repaired missing project fields: $missing_csv${NC}"
+    elif [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Project fields validated.${NC}"
+    fi
+}
+
 # On resume, cross-check task issue states for consistency
 crosscheck_issues() {
     if [ "$GITHUB_ENABLED" = false ]; then
@@ -1536,6 +1602,9 @@ run_ralph_loop() {
             error_exit "Cannot resume: last iteration ($last_iteration) already at or exceeds max iterations ($MAX_ITERATIONS)." "Use --max-iterations with a higher value, e.g.:
   ./ralph-loop $PRD_FILE --resume --max-iterations $((last_iteration + 10))"
         fi
+
+        # Validate project field IDs are still valid
+        validate_project_fields
 
         # Cross-check GitHub issue states
         crosscheck_issues
