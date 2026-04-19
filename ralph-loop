@@ -1997,6 +1997,8 @@ run_ralph_loop() {
     fi
 
     local start_time=$(date +%s)
+    capture_original_branch
+    git_branching_preflight
     local iteration=1
 
     # If resuming, start from last iteration + 1
@@ -2086,6 +2088,10 @@ run_ralph_loop() {
 
         # Ensure this task is in the GitHub project
         ensure_project_item "$next_task_id" "$task_index"
+
+        # Phase 5: snapshot working tree + switch to task branch
+        snapshot_working_tree
+        ensure_task_branch "$next_task_id" "$task_index"
 
         # Log iteration start
         log_iteration "$iteration" "$next_task_id" "$task_title"
@@ -2232,6 +2238,11 @@ Try again later or check Claude API status at https://status.anthropic.com"
         if [ $json_valid_exit -ne 0 ]; then
             echo -e "${YELLOW}⚠ JSON file corrupted during iteration. Restoring from snapshot.${NC}"
             cp "${JSON_FILE}.pre-iteration" "$JSON_FILE"
+            # Phase 5: commit the failed iteration with Ralph-Status: failed
+            commit_iteration "$next_task_id" "$task_index" "$iteration" "" "failed"
+            push_task_branch
+            ensure_task_pr "$next_task_id" "$task_index"
+            restore_working_tree
             log_iteration_result "$iteration" "$next_task_id" "FAILED" "JSON corrupted, restored from snapshot"
             iteration=$((iteration + 1))
             continue
@@ -2314,6 +2325,12 @@ Try again later or check Claude API status at https://status.anthropic.com"
             # Sync project fields
             sync_project_item "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
+            # Phase 5: commit + push + flip PR to ready
+            commit_iteration "$next_task_id" "$task_index" "$iteration" "$verify_result" "passed"
+            push_task_branch
+            ensure_task_pr "$next_task_id" "$task_index"
+            mark_pr_ready "$next_task_id" "$task_index"
+
             # Close the GitHub issue
             close_task_issue "$next_task_id" "$task_index" "$iteration"
 
@@ -2370,6 +2387,11 @@ Try again later or check Claude API status at https://status.anthropic.com"
             # Sync project fields
             sync_project_item "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
+            # Phase 5: commit in-progress state + push + open draft PR
+            commit_iteration "$next_task_id" "$task_index" "$iteration" "$verify_result" "in-progress"
+            push_task_branch
+            ensure_task_pr "$next_task_id" "$task_index"
+
             # Check for thrash
             local thrash_criterion
             if thrash_criterion=$(check_thrash "$next_task_id"); then
@@ -2406,6 +2428,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
         # Show progress visualization
         show_progress "$iteration" "$start_time"
 
+        # Phase 5: return to the caller's branch between iterations
+        restore_working_tree
+
         # Clean up iteration snapshot
         rm -f "${JSON_FILE}.pre-iteration"
 
@@ -2420,6 +2445,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
             sleep 2
         fi
     done
+
+    # Phase 5: ensure we're back on the caller's branch regardless of how the loop exited
+    restore_working_tree
 
     # Final check: Verify if all tasks are actually complete before declaring success/failure
     # This handles the case where the last iteration completed all tasks but didn't detect it

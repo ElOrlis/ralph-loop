@@ -76,6 +76,25 @@ test_pr_helpers_defined() {
     done
 }
 
+test_run_loop_calls_branching_helpers() {
+    echo ""; echo "Test: run_ralph_loop invokes branching helpers in addition to defining them"
+    local src="$RALPH_LOOP"
+    # Each helper must appear AT LEAST TWICE in ralph-loop: once at definition (^name()), once as a call.
+    local missing=()
+    for fn in capture_original_branch ensure_task_branch commit_iteration ensure_task_pr mark_pr_ready restore_working_tree snapshot_working_tree; do
+        local count
+        count=$(grep -c "${fn}" "$src")
+        if [ "$count" -lt 2 ]; then
+            missing+=("$fn (count=$count)")
+        fi
+    done
+    if [ ${#missing[@]} -eq 0 ]; then
+        pass "run_ralph_loop wires all branching helpers"
+    else
+        fail "helpers not called from run_ralph_loop: ${missing[*]}"
+    fi
+}
+
 setup
 trap cleanup EXIT
 test_no_branch_flag_parses
@@ -84,6 +103,7 @@ test_no_github_implies_no_branch
 test_snapshot_and_branch_functions_exist
 test_commit_iteration_defined
 test_pr_helpers_defined
+test_run_loop_calls_branching_helpers
 
 echo ""
 echo "────────────────────────────────────────────────"
