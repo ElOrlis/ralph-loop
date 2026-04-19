@@ -38,6 +38,7 @@ TEST_SCRIPTS=(
     "test-criteria.sh"
     "test-dry-run.sh"
     "test-github.sh"
+    "test-github-projects.sh"
 )
 
 # Run each test suite
