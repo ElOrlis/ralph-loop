@@ -1196,6 +1196,8 @@ Some tasks remain incomplete. Use --resume to continue.
 
 EOF
     fi
+    emit_logging_event run_complete \
+        "{\"success\":$([ "$2" = "true" ] && echo true || echo false),\"totalIterations\":$1,\"elapsed\":0,\"githubApiCalls\":$GITHUB_API_CALLS}"
 }
 
 # Display real-time progress visualization
@@ -2043,6 +2045,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
         echo "  Total Tasks Completed: $(jq '[.tasks[] | select(.passes == true)] | length' "$JSON_FILE") / $(jq '.tasks | length' "$JSON_FILE")"
         echo "  Total Time: $(printf "%02d:%02d" $total_minutes $total_seconds)"
         echo "  Iterations Used: $((iteration - 1)) / $MAX_ITERATIONS"
+        if [ "$GITHUB_ENABLED" = true ] && [ "$GITHUB_API_CALLS" -gt 0 ]; then
+            echo "  GitHub API Calls: $GITHUB_API_CALLS"
+        fi
         echo ""
         echo "  Final PRD: $JSON_FILE"
         echo "  Progress Log: $PROGRESS_FILE"
@@ -2068,6 +2073,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
         echo "  Tasks Completed: $completed_count / $total_count"
         echo "  Tasks Remaining: $incomplete_count"
         echo "  Total Time: $(printf "%02d:%02d" $total_minutes $total_seconds)"
+        if [ "$GITHUB_ENABLED" = true ] && [ "$GITHUB_API_CALLS" -gt 0 ]; then
+            echo "  GitHub API Calls: $GITHUB_API_CALLS"
+        fi
         echo ""
         echo "Incomplete tasks:"
 
