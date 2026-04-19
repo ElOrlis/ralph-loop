@@ -404,7 +404,7 @@ test_accepts_ralph_git_meta() {
 EOF
 
     local output exit_code
-    output=$("../ralph-loop" "$TEST_DIR/prd.json" --dry-run 2>&1) && exit_code=0 || exit_code=$?
+    output=$(../ralph-loop "$TEST_DIR/prd.json" --dry-run 2>&1) && exit_code=0 || exit_code=$?
     if [ "$exit_code" -eq 0 ]; then
         pass "accepts ralphGitMeta + branch fields"
     else
@@ -428,7 +428,7 @@ test_rejects_bad_branch_name_type() {
 EOF
 
     local output exit_code
-    output=$("../ralph-loop" "$TEST_DIR/prd.json" --dry-run 2>&1) && exit_code=0 || exit_code=$?
+    output=$(../ralph-loop "$TEST_DIR/prd.json" --dry-run 2>&1) && exit_code=0 || exit_code=$?
     if [ "$exit_code" -ne 0 ] && echo "$output" | grep -q "branchName"; then
         pass "rejects non-string branchName"
     else

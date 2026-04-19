@@ -608,8 +608,8 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
     if jq -e '.ralphGitMeta' "$json_file" >/dev/null 2>&1; then
         local gm_fields
         for gm_fields in originalBranch prdSlug; do
-            if ! jq -e ".ralphGitMeta.$gm_fields | type == \"string\"" "$json_file" >/dev/null 2>&1; then
-                echo -e "${RED}[ERROR] ralphGitMeta.$gm_fields must be a string${NC}"
+            if ! jq -e ".ralphGitMeta.$gm_fields | type == \"string\" and length > 0" "$json_file" >/dev/null 2>&1; then
+                echo -e "${RED}[ERROR] ralphGitMeta.$gm_fields must be a non-empty string${NC}"
                 return 1
             fi
         done
