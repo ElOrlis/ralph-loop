@@ -21,6 +21,10 @@ TARGET_REPO=""
 GITHUB_API_CALLS=0
 GITHUB_API_WARN_THRESHOLD=100
 GITHUB_API_WARNED=false
+BRANCH_ENABLED=true
+ORIGINAL_BRANCH=""
+CURRENT_TASK_BRANCH=""
+STASH_APPLIED=false
 PRD_FILE=""
 JSON_FILE=""
 PROGRESS_FILE=""
@@ -79,6 +83,8 @@ OPTIONS:
   --help                  Show this help message
   --dry-run               Show next prompt and exit (don't call Claude)
   --no-github             Disable all GitHub integration
+  --no-branch             Disable per-task git branching and PR creation
+                          (automatically set by --no-github)
   --repo owner/name      Override target GitHub repository
                           (default: PRD "repository" field or git remote origin)
 
@@ -258,6 +264,11 @@ parse_arguments() {
                 ;;
             --no-github)
                 GITHUB_ENABLED=false
+                BRANCH_ENABLED=false
+                shift
+                ;;
+            --no-branch)
+                BRANCH_ENABLED=false
                 shift
                 ;;
             --repo)
@@ -2163,6 +2174,7 @@ main() {
         echo -e "${BLUE}[DEBUG] DEBUG: $DEBUG${NC}"
         echo -e "${BLUE}[DEBUG] RESUME: $RESUME${NC}"
         echo -e "${BLUE}[DEBUG] ANALYZE_PRD: $ANALYZE_PRD${NC}"
+        echo -e "${BLUE}[DEBUG] BRANCH_ENABLED: $BRANCH_ENABLED${NC}"
     fi
 
     echo -e "${GREEN}✓${NC} Arguments validated successfully"
