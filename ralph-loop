@@ -2339,13 +2339,17 @@ Try again later or check Claude API status at https://status.anthropic.com"
             fi
         else
             # Some criteria failed — update results but keep passes=false
-            local updated_prd=$(jq \
+            local updated_prd
+            if ! updated_prd=$(jq \
                 --argjson idx "$task_index" \
                 --arg now "$now" \
                 --argjson results "$verify_result" \
                 '.tasks[$idx].criteriaResults = $results.results' \
-                "$JSON_FILE" 2>/dev/null || cat "$JSON_FILE")
-            echo "$updated_prd" | jq '.' > "$JSON_FILE" 2>/dev/null || true
+                "$JSON_FILE" 2>&1); then
+                echo -e "${YELLOW}[WARN] Could not merge criteria results into PRD JSON: $updated_prd${NC}"
+            else
+                echo "$updated_prd" | jq '.' > "$JSON_FILE"
+            fi
 
             log_iteration_result "$iteration" "$next_task_id" "IN PROGRESS" "Criteria verification: some failed"
 
