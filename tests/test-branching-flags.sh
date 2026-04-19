@@ -68,6 +68,14 @@ test_commit_iteration_defined() {
     else fail "missing function commit_iteration"; fi
 }
 
+test_pr_helpers_defined() {
+    echo ""; echo "Test: ralph-loop defines ensure_task_pr + mark_pr_ready + push_task_branch"
+    for fn in ensure_task_pr mark_pr_ready push_task_branch; do
+        if grep -q "^${fn}()" "$RALPH_LOOP"; then pass "defines ${fn}"
+        else fail "missing function ${fn}"; fi
+    done
+}
+
 setup
 trap cleanup EXIT
 test_no_branch_flag_parses
@@ -75,6 +83,7 @@ test_help_documents_no_branch
 test_no_github_implies_no_branch
 test_snapshot_and_branch_functions_exist
 test_commit_iteration_defined
+test_pr_helpers_defined
 
 echo ""
 echo "────────────────────────────────────────────────"

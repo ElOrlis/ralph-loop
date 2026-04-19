@@ -1083,6 +1083,110 @@ commit_iteration() {
         "{\"iteration\":$iteration,\"taskId\":\"$task_id\",\"branchName\":\"$CURRENT_TASK_BRANCH\",\"sha\":\"$sha\",\"ralphStatus\":\"$ralph_status\",\"criteriaPassCount\":$pass_count,\"criteriaTotal\":$total_count}"
 }
 
+# Push the current task branch to origin. Non-fatal on failure.
+push_task_branch() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+
+    local reply
+    reply=$(node "$SCRIPT_DIR/lib/git/index.js" push --branch "$CURRENT_TASK_BRANCH" 2>&1) || true
+    local ok
+    ok=$(echo "$reply" | jq -r '.ok' 2>/dev/null || echo "false")
+    if [ "$ok" != "true" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${YELLOW}[WARN] Could not push $CURRENT_TASK_BRANCH: $(echo "$reply" | jq -r '.error // empty')${NC}"
+        fi
+    fi
+}
+
+# Create a draft PR for a task if one doesn't yet exist. Persists prNumber + prUrl.
+ensure_task_pr() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+
+    local existing_pr
+    existing_pr=$(jq -r ".tasks[$task_index].prNumber // empty" "$JSON_FILE")
+    if [ -n "$existing_pr" ]; then return 0; fi
+
+    local task_title
+    task_title=$(jq -r ".tasks[$task_index].title" "$JSON_FILE")
+    local issue_number
+    issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+
+    local args=(
+        ensure-pr
+        --repo "$TARGET_REPO"
+        --branch "$CURRENT_TASK_BRANCH"
+        --base "$ORIGINAL_BRANCH"
+        --task-id "$task_id"
+        --task-title "$task_title"
+    )
+    if [ -n "$issue_number" ]; then
+        args+=(--issue "$issue_number")
+    fi
+
+    local reply reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" "${args[@]}" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] ensure-pr failed for $task_id: $reply${NC}"
+        return 0
+    fi
+
+    local pr_number pr_url created
+    pr_number=$(echo "$reply" | jq -r '.prNumber')
+    pr_url=$(echo "$reply" | jq -r '.prUrl')
+    created=$(echo "$reply" | jq -r '.created')
+
+    local updated
+    updated=$(jq --argjson idx "$task_index" --argjson n "$pr_number" --arg u "$pr_url" \
+        '.tasks[$idx].prNumber = $n | .tasks[$idx].prUrl = $u' "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+
+    if [ "$created" = "true" ]; then
+        emit_logging_event pr_created \
+            "{\"taskId\":\"$task_id\",\"prNumber\":$pr_number,\"prUrl\":\"$pr_url\",\"branchName\":\"$CURRENT_TASK_BRANCH\"}"
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${GREEN}[INFO] Created draft PR #$pr_number: $pr_url${NC}"
+        fi
+    elif [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Reusing existing PR #$pr_number for $task_id${NC}"
+    fi
+}
+
+# Flip a task's draft PR to ready-for-review
+mark_pr_ready() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+
+    local pr_number
+    pr_number=$(jq -r ".tasks[$task_index].prNumber // empty" "$JSON_FILE")
+    if [ -z "$pr_number" ]; then return 0; fi
+
+    local reply reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" mark-pr-ready \
+        --repo "$TARGET_REPO" --pr "$pr_number" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] mark-pr-ready failed for $task_id: $reply${NC}"
+        return 0
+    fi
+
+    emit_logging_event pr_marked_ready \
+        "{\"taskId\":\"$task_id\",\"prNumber\":$pr_number}"
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${GREEN}[INFO] Marked PR #$pr_number ready for review${NC}"
+    fi
+}
+
 # On resume, cross-check task issue states for consistency
 crosscheck_issues() {
     if [ "$GITHUB_ENABLED" = false ]; then
