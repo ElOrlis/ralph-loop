@@ -51,11 +51,23 @@ test_no_github_implies_no_branch() {
     else fail "--no-github did not disable branching. Output: $output"; fi
 }
 
+test_snapshot_and_branch_functions_exist() {
+    echo ""; echo "Test: ralph-loop defines snapshot_working_tree + ensure_task_branch + restore_working_tree"
+    for fn in snapshot_working_tree ensure_task_branch restore_working_tree capture_original_branch git_branching_preflight; do
+        if grep -q "^${fn}()" "$RALPH_LOOP"; then
+            pass "defines ${fn}"
+        else
+            fail "missing function ${fn}"
+        fi
+    done
+}
+
 setup
 trap cleanup EXIT
 test_no_branch_flag_parses
 test_help_documents_no_branch
 test_no_github_implies_no_branch
+test_snapshot_and_branch_functions_exist
 
 echo ""
 echo "────────────────────────────────────────────────"

@@ -831,6 +831,184 @@ validate_project_fields() {
     fi
 }
 
+# Capture and persist the caller's branch + PRD slug on PRD root
+capture_original_branch() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ "$DRY_RUN" = true ]; then return 0; fi
+
+    local existing
+    existing=$(jq -r '.ralphGitMeta.originalBranch // empty' "$JSON_FILE")
+    if [ -n "$existing" ]; then
+        ORIGINAL_BRANCH="$existing"
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] Using stored originalBranch: $ORIGINAL_BRANCH${NC}"
+        fi
+        return 0
+    fi
+
+    local current
+    local current_exit=0
+    current=$(node "$SCRIPT_DIR/lib/git/index.js" current-branch 2>&1) || current_exit=$?
+    if [ $current_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Could not determine current git branch: $current${NC}"
+        echo -e "${YELLOW}[WARN] Disabling branching for this run.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+    ORIGINAL_BRANCH=$(echo "$current" | jq -r '.branch')
+
+    local prd_base
+    prd_base=$(basename "$PRD_FILE")
+    prd_base="${prd_base%.*}"
+    local slug_reply
+    slug_reply=$(node "$SCRIPT_DIR/lib/git/index.js" slugify --input "$prd_base" 2>&1) || {
+        echo -e "${YELLOW}[WARN] slugify failed: $slug_reply${NC}"; BRANCH_ENABLED=false; return 0;
+    }
+    local prd_slug
+    prd_slug=$(echo "$slug_reply" | jq -r '.slug')
+    if [ -z "$prd_slug" ] || [ "$prd_slug" = "null" ]; then
+        echo -e "${YELLOW}[WARN] Could not derive prdSlug from $prd_base. Disabling branching.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+
+    local updated
+    updated=$(jq --arg b "$ORIGINAL_BRANCH" --arg s "$prd_slug" \
+        '.ralphGitMeta = {originalBranch: $b, prdSlug: $s}' "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Captured originalBranch=$ORIGINAL_BRANCH, prdSlug=$prd_slug${NC}"
+    fi
+}
+
+# One-shot preflight: abort branching if prerequisites (git CLI, clean-enough state) aren't met
+git_branching_preflight() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if ! command -v git >/dev/null 2>&1; then
+        echo -e "${YELLOW}[WARN] git CLI not found. Disabling branching.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+    if [ -z "$ORIGINAL_BRANCH" ]; then
+        echo -e "${YELLOW}[WARN] ORIGINAL_BRANCH is empty. Disabling branching.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+}
+
+# Snapshot working tree before switching to a task branch
+snapshot_working_tree() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+
+    local dirty_reply
+    dirty_reply=$(node "$SCRIPT_DIR/lib/git/index.js" has-uncommitted 2>&1) || return 0
+    local dirty
+    dirty=$(echo "$dirty_reply" | jq -r '.dirty')
+
+    if [ "$dirty" = "true" ]; then
+        local ts=$(date +%s)
+        local push_reply
+        push_reply=$(node "$SCRIPT_DIR/lib/git/index.js" stash-push --message "ralph-loop-iter-$ts" 2>&1) || {
+            echo -e "${YELLOW}[WARN] stash-push failed: $push_reply. Continuing without stash.${NC}"
+            STASH_APPLIED=false
+            return 0
+        }
+        local stashed
+        stashed=$(echo "$push_reply" | jq -r '.stashed')
+        STASH_APPLIED="$stashed"
+        if [ "$VERBOSE" = true ] && [ "$stashed" = "true" ]; then
+            echo -e "${BLUE}[INFO] Stashed uncommitted changes before branch switch${NC}"
+        fi
+    else
+        STASH_APPLIED=false
+    fi
+}
+
+# Ensure a task branch exists and switch to it. Persists task.branchName.
+ensure_task_branch() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+
+    local prd_slug
+    prd_slug=$(jq -r '.ralphGitMeta.prdSlug // empty' "$JSON_FILE")
+    if [ -z "$prd_slug" ]; then
+        echo -e "${YELLOW}[WARN] prdSlug missing; skipping branch for $task_id.${NC}"
+        return 0
+    fi
+
+    local task_title
+    task_title=$(jq -r ".tasks[$task_index].title" "$JSON_FILE")
+
+    local existing_branch
+    existing_branch=$(jq -r ".tasks[$task_index].branchName // empty" "$JSON_FILE")
+
+    local branch_name
+    if [ -n "$existing_branch" ]; then
+        branch_name="$existing_branch"
+    else
+        local name_reply
+        name_reply=$(node "$SCRIPT_DIR/lib/git/index.js" branch-name \
+            --prd-slug "$prd_slug" --task-id "$task_id" --title "$task_title" 2>&1) || {
+            echo -e "${YELLOW}[WARN] branch-name failed: $name_reply${NC}"
+            return 0
+        }
+        branch_name=$(echo "$name_reply" | jq -r '.branchName')
+        local updated
+        updated=$(jq --argjson idx "$task_index" --arg n "$branch_name" \
+            '.tasks[$idx].branchName = $n' "$JSON_FILE")
+        echo "$updated" | jq '.' > "$JSON_FILE"
+    fi
+
+    local ensure_reply
+    ensure_reply=$(node "$SCRIPT_DIR/lib/git/index.js" ensure-branch \
+        --name "$branch_name" --base "$ORIGINAL_BRANCH" 2>&1) || {
+        echo -e "${YELLOW}[WARN] ensure-branch failed: $ensure_reply${NC}"
+        return 0
+    }
+    local created
+    created=$(echo "$ensure_reply" | jq -r '.created')
+
+    node "$SCRIPT_DIR/lib/git/index.js" switch-to --name "$branch_name" >/dev/null 2>&1 || {
+        echo -e "${YELLOW}[WARN] Could not switch to $branch_name; branching disabled this iter.${NC}"
+        CURRENT_TASK_BRANCH=""
+        return 0
+    }
+    CURRENT_TASK_BRANCH="$branch_name"
+
+    if [ "$created" = "true" ]; then
+        emit_logging_event branch_created \
+            "{\"taskId\":\"$task_id\",\"branchName\":\"$branch_name\",\"baseBranch\":\"$ORIGINAL_BRANCH\"}"
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${GREEN}[INFO] Created branch $branch_name off $ORIGINAL_BRANCH${NC}"
+        fi
+    elif [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Switched to existing task branch: $branch_name${NC}"
+    fi
+}
+
+# Switch back to ORIGINAL_BRANCH and restore any stash pushed earlier
+restore_working_tree() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ -z "$ORIGINAL_BRANCH" ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+
+    node "$SCRIPT_DIR/lib/git/index.js" switch-to --name "$ORIGINAL_BRANCH" >/dev/null 2>&1 || {
+        echo -e "${YELLOW}[WARN] Could not switch back to $ORIGINAL_BRANCH.${NC}"
+        return 0
+    }
+    CURRENT_TASK_BRANCH=""
+
+    if [ "$STASH_APPLIED" = "true" ]; then
+        node "$SCRIPT_DIR/lib/git/index.js" stash-pop >/dev/null 2>&1 || {
+            echo -e "${YELLOW}[WARN] Could not pop ralph-loop stash. Run 'git stash list' to recover.${NC}"
+        }
+        STASH_APPLIED=false
+    fi
+}
+
 # On resume, cross-check task issue states for consistency
 crosscheck_issues() {
     if [ "$GITHUB_ENABLED" = false ]; then
