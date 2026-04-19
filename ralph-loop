@@ -95,6 +95,13 @@ OPTIONS:
     Ralph Status fields after every iteration. GitHub API calls are reported
     at end of run; a warning prints at 100 calls.
 
+  Git Branching & PRs (Phase 5):
+    Each task gets its own branch (ralph/<prd>/<task>-<slug>) off the caller's
+    current branch. Each iteration is a separate commit with Ralph-Task-Id,
+    Ralph-Issue, and Ralph-Status trailers. A draft PR opens after the first
+    commit and flips to ready-for-review when all criteria pass. Use
+    --no-branch to disable; --no-github also implies --no-branch.
+
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
 ╚════════════════════════════════════════════════════════════════════════════╝
