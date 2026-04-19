@@ -18,6 +18,9 @@ DRY_RUN=false
 GITHUB_ENABLED=true
 REPO_OVERRIDE=""
 TARGET_REPO=""
+GITHUB_API_CALLS=0
+GITHUB_API_WARN_THRESHOLD=100
+GITHUB_API_WARNED=false
 PRD_FILE=""
 JSON_FILE=""
 PROGRESS_FILE=""
@@ -78,6 +81,13 @@ OPTIONS:
   --no-github             Disable all GitHub integration
   --repo owner/name      Override target GitHub repository
                           (default: PRD "repository" field or git remote origin)
+
+  GitHub Projects v2 (Phase 4):
+    Each PRD gets a dedicated GitHub project. Ralph creates it on first run
+    (requires 'project' scope: gh auth refresh -s project,read:project,write:project)
+    and syncs Priority, Category, Iteration Count, Criteria Pass Rate, and
+    Ralph Status fields after every iteration. GitHub API calls are reported
+    at end of run; a warning prints at 100 calls.
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
@@ -568,7 +578,60 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
         echo -e "${GREEN}✓${NC} PRD validation passed: $task_count tasks validated"
     fi
 
+    # Optional: githubProject must be object with number, id, owner, ownerType, url, fieldIds
+    if jq -e '.githubProject' "$json_file" >/dev/null 2>&1; then
+        local gp_fields
+        for gp_fields in number id owner ownerType url fieldIds; do
+            if ! jq -e ".githubProject.$gp_fields" "$json_file" >/dev/null 2>&1; then
+                echo -e "${RED}[ERROR] githubProject missing required field: $gp_fields${NC}"
+                return 1
+            fi
+        done
+        local expected_fids="priority category iterationCount criteriaPassRate ralphStatus"
+        local fid
+        for fid in $expected_fids; do
+            if ! jq -e ".githubProject.fieldIds.$fid.id" "$json_file" >/dev/null 2>&1; then
+                echo -e "${YELLOW}[WARN] githubProject.fieldIds.$fid.id missing — will be repaired by --resume${NC}"
+            fi
+        done
+    fi
+
+    # Optional: each task.projectItemId (if present) must be string
+    local projitem_bad
+    projitem_bad=$(jq -r '.tasks[] | select(.projectItemId != null) | select((.projectItemId | type) != "string") | .id' "$json_file")
+    if [ -n "$projitem_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with non-string projectItemId: $projitem_bad${NC}"
+        return 1
+    fi
+
     return 0
+}
+
+# Args: $1 = JSON reply containing optional .apiCalls field
+bump_github_api_calls() {
+    local reply="$1"
+    local delta
+    delta=$(echo "$reply" | jq -r '.apiCalls // 0' 2>/dev/null || echo 0)
+    if [[ "$delta" =~ ^[0-9]+$ ]] && [ "$delta" -gt 0 ]; then
+        GITHUB_API_CALLS=$((GITHUB_API_CALLS + delta))
+    fi
+    if [ "$GITHUB_API_WARNED" = false ] && [ "$GITHUB_API_CALLS" -ge "$GITHUB_API_WARN_THRESHOLD" ]; then
+        echo -e "${YELLOW}[WARN] GitHub API calls this run: $GITHUB_API_CALLS (threshold: $GITHUB_API_WARN_THRESHOLD). Projects v2 / issue traffic is high.${NC}"
+        GITHUB_API_WARNED=true
+        emit_logging_event project_rate_limit_warning "{\"callCount\":$GITHUB_API_CALLS,\"threshold\":$GITHUB_API_WARN_THRESHOLD}"
+    fi
+}
+
+# Args: $1 = event name, $2 = JSON object payload (without ts/event)
+emit_logging_event() {
+    local event="$1"
+    local payload="$2"
+    local log_cli="$SCRIPT_DIR/lib/logging/index.js"
+    if [ ! -f "$log_cli" ]; then return 0; fi
+    local ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local merged
+    merged=$(echo "$payload" | jq --arg ts "$ts" --arg event "$event" '. + {ts:$ts, event:$event}')
+    node "$log_cli" append --file "$PROGRESS_FILE" --event "$merged" >/dev/null 2>&1 || true
 }
 
 # Resolve target GitHub repository
@@ -597,6 +660,128 @@ resolve_target_repo() {
 
     if [ "$VERBOSE" = true ]; then
         echo -e "${BLUE}[INFO] Target GitHub repo: $TARGET_REPO${NC}"
+    fi
+}
+
+ensure_github_project() {
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+
+    local existing
+    existing=$(jq -r '.githubProject.number // empty' "$JSON_FILE")
+    if [ -n "$existing" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] GitHub project already configured: #$existing${NC}"
+        fi
+        return 0
+    fi
+
+    local prd_title
+    prd_title=$(jq -r '.title // "Ralph Loop PRD"' "$JSON_FILE")
+    local categories_csv
+    categories_csv=$(jq -r '[.tasks[].category] | unique | join(",")' "$JSON_FILE")
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Creating GitHub project for PRD: $prd_title${NC}"
+    fi
+
+    local create_result
+    local create_exit=0
+    create_result=$(node "$SCRIPT_DIR/lib/github/index.js" create-project \
+        --repo "$TARGET_REPO" \
+        --title "$prd_title" \
+        --categories "$categories_csv" 2>&1) || create_exit=$?
+
+    if [ $create_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Failed to create GitHub project: $create_result${NC}"
+        echo -e "${YELLOW}[WARN] Continuing without project board. Check 'gh auth status' and 'project' scope.${NC}"
+        return 0
+    fi
+
+    bump_github_api_calls "$create_result"
+
+    local gp_json
+    gp_json=$(echo "$create_result" | jq '.githubProject')
+    local updated
+    updated=$(jq --argjson gp "$gp_json" '.githubProject = $gp' "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+
+    local project_number project_id project_url
+    project_number=$(echo "$gp_json" | jq -r '.number')
+    project_id=$(echo "$gp_json" | jq -r '.id')
+    project_url=$(echo "$gp_json" | jq -r '.url')
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${GREEN}[INFO] Created project #$project_number at $project_url${NC}"
+    fi
+
+    emit_logging_event project_created \
+        "{\"projectNumber\":$project_number,\"projectId\":\"$project_id\",\"url\":\"$project_url\",\"fieldCount\":5}"
+}
+
+validate_project_fields() {
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    local project_id
+    project_id=$(jq -r '.githubProject.id // empty' "$JSON_FILE")
+    if [ -z "$project_id" ]; then return 0; fi
+
+    local project_json
+    project_json=$(jq '.githubProject' "$JSON_FILE")
+
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" validate-project \
+        --project "$project_json" 2>&1) || reply_exit=$?
+
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Could not validate project fields on resume: $reply${NC}"
+        return 0
+    fi
+
+    bump_github_api_calls "$reply"
+
+    local ok
+    ok=$(echo "$reply" | jq -r '.ok')
+    local updated_field_ids
+    updated_field_ids=$(echo "$reply" | jq '.updatedFieldIds')
+
+    # Always refresh fieldIds in case options shifted
+    local updated_prd
+    updated_prd=$(jq --argjson fids "$updated_field_ids" '.githubProject.fieldIds = $fids' "$JSON_FILE")
+    echo "$updated_prd" | jq '.' > "$JSON_FILE"
+
+    if [ "$ok" != "true" ]; then
+        local missing_csv
+        missing_csv=$(echo "$reply" | jq -r '.missing | join(",")')
+        echo -e "${YELLOW}[WARN] Missing project fields on resume: $missing_csv. Attempting repair...${NC}"
+
+        local categories_csv
+        categories_csv=$(jq -r '[.tasks[].category] | unique | join(",")' "$JSON_FILE")
+        local refreshed_project
+        refreshed_project=$(jq '.githubProject' "$JSON_FILE")
+
+        local repair_reply
+        local repair_exit=0
+        repair_reply=$(node "$SCRIPT_DIR/lib/github/index.js" repair-project-fields \
+            --project "$refreshed_project" \
+            --missing "$missing_csv" \
+            --categories "$categories_csv" 2>&1) || repair_exit=$?
+
+        if [ $repair_exit -ne 0 ]; then
+            echo -e "${YELLOW}[WARN] Repair failed: $repair_reply${NC}"
+            return 0
+        fi
+
+        bump_github_api_calls "$repair_reply"
+
+        local repaired_fids
+        repaired_fids=$(echo "$repair_reply" | jq '.fieldIds')
+        updated_prd=$(jq --argjson fids "$repaired_fids" '.githubProject.fieldIds = $fids' "$JSON_FILE")
+        echo "$updated_prd" | jq '.' > "$JSON_FILE"
+
+        echo -e "${GREEN}[INFO] Repaired missing project fields: $missing_csv${NC}"
+    elif [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Project fields validated.${NC}"
     fi
 }
 
@@ -1018,6 +1203,8 @@ Some tasks remain incomplete. Use --resume to continue.
 
 EOF
     fi
+    emit_logging_event run_complete \
+        "{\"success\":$([ "$2" = "true" ] && echo true || echo false),\"totalIterations\":$1,\"elapsed\":0,\"githubApiCalls\":$GITHUB_API_CALLS}"
 }
 
 # Display real-time progress visualization
@@ -1219,6 +1406,57 @@ ensure_task_issue() {
     fi
 }
 
+ensure_project_item() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+
+    local project_id
+    project_id=$(jq -r '.githubProject.id // empty' "$JSON_FILE")
+    if [ -z "$project_id" ]; then return 0; fi
+
+    local existing_item
+    existing_item=$(jq -r ".tasks[$task_index].projectItemId // empty" "$JSON_FILE")
+    if [ -n "$existing_item" ]; then return 0; fi
+
+    local issue_number
+    issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+    if [ -z "$issue_number" ]; then
+        echo -e "${YELLOW}[WARN] Cannot add project item for $task_id: no issueNumber.${NC}"
+        return 0
+    fi
+
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" ensure-project-item \
+        --repo "$TARGET_REPO" \
+        --project-id "$project_id" \
+        --issue "$issue_number" 2>&1) || reply_exit=$?
+
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Failed to add $task_id (issue #$issue_number) to project: $reply${NC}"
+        return 0
+    fi
+
+    bump_github_api_calls "$reply"
+
+    local item_id
+    item_id=$(echo "$reply" | jq -r '.projectItemId')
+    local updated
+    updated=$(jq \
+        --argjson idx "$task_index" \
+        --arg id "$item_id" \
+        '.tasks[$idx].projectItemId = $id' \
+        "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Added $task_id (issue #$issue_number) to project as $item_id${NC}"
+    fi
+}
+
 # Post iteration results as a comment on the task's GitHub issue
 post_iteration_comment() {
     local task_id="$1"
@@ -1251,6 +1489,62 @@ post_iteration_comment() {
         --criteria "$criteria_json" 2>&1 || {
         echo -e "${YELLOW}[WARN] Failed to post comment to issue #$issue_number${NC}"
     }
+}
+
+sync_project_item() {
+    local task_id="$1"
+    local task_index="$2"
+    local iteration="$3"
+    local verify_result="$4"
+
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+
+    local project_id
+    project_id=$(jq -r '.githubProject.id // empty' "$JSON_FILE")
+    if [ -z "$project_id" ]; then return 0; fi
+
+    local project_item
+    project_item=$(jq -r ".tasks[$task_index].projectItemId // empty" "$JSON_FILE")
+    if [ -z "$project_item" ]; then return 0; fi
+
+    local project_json
+    project_json=$(jq '.githubProject' "$JSON_FILE")
+    local task_json
+    task_json=$(jq ".tasks[$task_index]" "$JSON_FILE")
+
+    local detect_flag=""
+    if [ "$DEBUG" = true ]; then detect_flag="--detect-conflicts"; fi
+
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" sync-project-item \
+        --project "$project_json" \
+        --task "$task_json" \
+        --results "$verify_result" \
+        --iteration "$iteration" \
+        $detect_flag 2>&1) || reply_exit=$?
+
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Failed to sync project item for $task_id: $reply${NC}"
+        return 0
+    fi
+
+    bump_github_api_calls "$reply"
+
+    local conflict_count
+    conflict_count=$(echo "$reply" | jq '.conflicts | length' 2>/dev/null || echo 0)
+    if [ "$conflict_count" -gt 0 ] && [ "$VERBOSE" = true ]; then
+        echo -e "${YELLOW}[WARN] $task_id: $conflict_count project-field conflict(s) overwritten by Ralph.${NC}"
+        echo "$reply" | jq -r '.conflicts[] | "  field=\(.fieldId) before=\(.before) after=\(.after)"'
+    fi
+
+    local rs pr ic
+    rs=$(echo "$reply" | jq -r '.ralphStatus')
+    pr=$(echo "$reply" | jq -r '.criteriaPassRate')
+    ic=$(echo "$reply" | jq -r '.iterationCount')
+    emit_logging_event project_item_synced \
+        "{\"iteration\":$iteration,\"taskId\":\"$task_id\",\"projectItemId\":\"$project_item\",\"ralphStatus\":\"$rs\",\"criteriaPassRate\":$pr,\"iterationCount\":$ic}"
 }
 
 # Close the GitHub issue when a task completes
@@ -1318,6 +1612,9 @@ run_ralph_loop() {
   ./ralph-loop $PRD_FILE --resume --max-iterations $((last_iteration + 10))"
         fi
 
+        # Validate project field IDs are still valid
+        validate_project_fields
+
         # Cross-check GitHub issue states
         crosscheck_issues
     fi
@@ -1384,6 +1681,9 @@ run_ralph_loop() {
 
         # Create GitHub issue if needed
         ensure_task_issue "$next_task_id" "$task_index"
+
+        # Ensure this task is in the GitHub project
+        ensure_project_item "$next_task_id" "$task_index"
 
         # Log iteration start
         log_iteration "$iteration" "$next_task_id" "$task_title"
@@ -1609,6 +1909,8 @@ Try again later or check Claude API status at https://status.anthropic.com"
 
             # Post iteration comment to GitHub issue
             post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result"
+            # Sync project fields
+            sync_project_item "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
             # Close the GitHub issue
             close_task_issue "$next_task_id" "$task_index" "$iteration"
@@ -1663,6 +1965,8 @@ Try again later or check Claude API status at https://status.anthropic.com"
 
             # Post iteration comment to GitHub issue
             post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result"
+            # Sync project fields
+            sync_project_item "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
             # Check for thrash
             local thrash_criterion
@@ -1748,6 +2052,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
         echo "  Total Tasks Completed: $(jq '[.tasks[] | select(.passes == true)] | length' "$JSON_FILE") / $(jq '.tasks | length' "$JSON_FILE")"
         echo "  Total Time: $(printf "%02d:%02d" $total_minutes $total_seconds)"
         echo "  Iterations Used: $((iteration - 1)) / $MAX_ITERATIONS"
+        if [ "$GITHUB_ENABLED" = true ] && [ "$GITHUB_API_CALLS" -gt 0 ]; then
+            echo "  GitHub API Calls: $GITHUB_API_CALLS"
+        fi
         echo ""
         echo "  Final PRD: $JSON_FILE"
         echo "  Progress Log: $PROGRESS_FILE"
@@ -1773,6 +2080,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
         echo "  Tasks Completed: $completed_count / $total_count"
         echo "  Tasks Remaining: $incomplete_count"
         echo "  Total Time: $(printf "%02d:%02d" $total_minutes $total_seconds)"
+        if [ "$GITHUB_ENABLED" = true ] && [ "$GITHUB_API_CALLS" -gt 0 ]; then
+            echo "  GitHub API Calls: $GITHUB_API_CALLS"
+        fi
         echo ""
         echo "Incomplete tasks:"
 
@@ -1832,6 +2142,7 @@ main() {
 
     # Resolve GitHub repository
     resolve_target_repo
+    ensure_github_project
 
     # If analyze mode, run analysis and exit
     if [ "$ANALYZE_PRD" = true ]; then

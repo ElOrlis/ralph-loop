@@ -517,6 +517,33 @@ When you run Ralph Loop, it creates the following files:
 
 These files are created in the same directory as your input PRD file.
 
+## GitHub Projects v2 Integration
+
+When `--no-github` is not set, ralph-loop creates one GitHub Project (Projects v2)
+per PRD on first run. The project:
+
+- Is owned by the user/organization parsed from `--repo` / PRD `repository`.
+- Title = PRD `title` field.
+- Gets five custom fields: **Priority** (number), **Category** (single-select,
+  one option per unique `category` in tasks), **Iteration Count** (number),
+  **Criteria Pass Rate** (number 0.0–1.0), **Ralph Status** (single-select:
+  Pending, In Progress, Passed, Failed, Stalled).
+- Each task's GitHub issue is added as a project item; Ralph-managed fields
+  update after every iteration.
+
+**Required token scope:** `project,read:project,write:project`. Run:
+
+```
+gh auth refresh -s project,read:project,write:project
+```
+
+**PRD JSON layout:** Ralph populates `githubProject` at the PRD root and
+`projectItemId` on each task. See `docs/superpowers/specs/2026-04-10-ralph-loop-enhancements-design.md`
+for the full schema.
+
+**Rate limiting:** API call counts print at end of each run. A warning prints
+at 100 calls. Use `--no-github` to skip all GitHub/Projects activity.
+
 ## Contributing
 
 Contributions are welcome! Here's how to contribute:
