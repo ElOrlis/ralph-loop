@@ -75,10 +75,30 @@ EOF
     else fail "task-2 blockedBy should be [\"task-1\"], got: $t2_blocked_by"; fi
 }
 
+test_merge_dependency_branches_function_exists() {
+    echo ""; echo "Test: ralph-loop defines merge_dependency_branches"
+    if grep -q "^merge_dependency_branches()" "$RALPH_LOOP"; then
+        pass "defines merge_dependency_branches"
+    else
+        fail "missing function merge_dependency_branches"
+    fi
+}
+
+test_loop_wires_merge_dependency_branches() {
+    echo ""; echo "Test: run_ralph_loop calls merge_dependency_branches after ensure_task_branch"
+    if grep -A2 'ensure_task_branch "\$next_task_id"' "$RALPH_LOOP" | grep -q 'merge_dependency_branches'; then
+        pass "run_ralph_loop wires merge_dependency_branches"
+    else
+        fail "merge_dependency_branches not wired after ensure_task_branch"
+    fi
+}
+
 setup
 trap cleanup EXIT
 test_find_next_task_respects_deps
 test_sync_blocked_statuses_writes_to_json
+test_merge_dependency_branches_function_exists
+test_loop_wires_merge_dependency_branches
 
 echo ""
 echo "Phase 6 dependency graph: $TESTS_PASSED passed, $TESTS_FAILED failed"

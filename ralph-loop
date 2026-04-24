@@ -1111,6 +1111,122 @@ restore_working_tree() {
     fi
 }
 
+# Phase 6: merge each completed dependency's branch into the current task branch.
+# Args: $1=task_id $2=task_index
+# Returns:
+#   0 on success (all deps merged or nothing to merge)
+#   1 on merge conflict — caller should mark the task blocked and skip the iteration.
+# On conflict: aborts the merge, writes status=blocked + blockedReason to the task,
+# posts a comment on the GitHub issue, and sets CURRENT_TASK_MERGE_CONFLICT=true.
+CURRENT_TASK_MERGE_CONFLICT=""
+merge_dependency_branches() {
+    local task_id="$1"
+    local task_index="$2"
+    CURRENT_TASK_MERGE_CONFLICT=""
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+
+    local deps_json
+    deps_json=$(jq -c ".tasks[$task_index].dependsOn // []" "$JSON_FILE")
+    local dep_count
+    dep_count=$(echo "$deps_json" | jq 'length')
+    if [ "$dep_count" -eq 0 ]; then return 0; fi
+
+    local dep_idx=0
+    while [ $dep_idx -lt "$dep_count" ]; do
+        local dep_id
+        dep_id=$(echo "$deps_json" | jq -r ".[$dep_idx]")
+        local dep_task_index
+        dep_task_index=$(jq --arg id "$dep_id" '.tasks | map(.id) | index($id) // -1' "$JSON_FILE")
+        if [ "$dep_task_index" = "-1" ]; then
+            dep_idx=$((dep_idx + 1))
+            continue
+        fi
+
+        local dep_passes dep_branch
+        dep_passes=$(jq -r ".tasks[$dep_task_index].passes" "$JSON_FILE")
+        dep_branch=$(jq -r ".tasks[$dep_task_index].branchName // empty" "$JSON_FILE")
+
+        # Skip deps that never got their own branch (e.g. --no-branch earlier runs).
+        if [ -z "$dep_branch" ] || [ "$dep_passes" != "true" ]; then
+            dep_idx=$((dep_idx + 1))
+            continue
+        fi
+
+        local reply
+        local reply_exit=0
+        reply=$(node "$SCRIPT_DIR/lib/git/index.js" merge-branch --branch "$dep_branch" 2>&1) || reply_exit=$?
+        if [ $reply_exit -ne 0 ]; then
+            echo -e "${YELLOW}[WARN] merge-branch call failed for $dep_branch: $reply${NC}"
+            dep_idx=$((dep_idx + 1))
+            continue
+        fi
+
+        local ok conflict
+        ok=$(echo "$reply" | jq -r '.ok')
+        conflict=$(echo "$reply" | jq -r '.conflict // false')
+
+        if [ "$ok" = "true" ]; then
+            local sha
+            sha=$(echo "$reply" | jq -r '.sha')
+            emit_logging_event dependency_merged \
+                "{\"taskId\":\"$task_id\",\"depTaskId\":\"$dep_id\",\"depBranch\":\"$dep_branch\",\"sha\":\"$sha\"}"
+            if [ "$VERBOSE" = true ]; then
+                echo -e "${GREEN}[INFO] Merged $dep_branch into $CURRENT_TASK_BRANCH (sha ${sha:0:7})${NC}"
+            fi
+            dep_idx=$((dep_idx + 1))
+            continue
+        fi
+
+        if [ "$conflict" = "true" ]; then
+            local files_csv
+            files_csv=$(echo "$reply" | jq -r '.files | join(", ")')
+            local files_json
+            files_json=$(echo "$reply" | jq -c '.files')
+
+            echo -e "${YELLOW}[WARN] Merge conflict on $task_id: $dep_branch conflicts in $files_csv${NC}"
+
+            # Persist status=blocked + blockedReason on the current task.
+            local reason="merge conflict with $dep_id on $files_csv"
+            local updated
+            updated=$(jq \
+                --argjson idx "$task_index" \
+                --arg reason "$reason" \
+                --argjson by "[\"$dep_id\"]" \
+                '.tasks[$idx].status = "blocked" |
+                 .tasks[$idx].blockedBy = $by |
+                 .tasks[$idx].blockedReason = $reason' \
+                "$JSON_FILE")
+            echo "$updated" | jq '.' > "$JSON_FILE"
+
+            emit_logging_event merge_conflict \
+                "{\"taskId\":\"$task_id\",\"depTaskId\":\"$dep_id\",\"depBranch\":\"$dep_branch\",\"files\":$files_json}"
+            emit_logging_event task_blocked \
+                "{\"taskId\":\"$task_id\",\"blockedBy\":[\"$dep_id\"],\"reason\":\"$reason\"}"
+
+            # Comment on the issue (if present + GitHub enabled).
+            local issue_number
+            issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+            if [ "$GITHUB_ENABLED" = true ] && [ -n "$TARGET_REPO" ] && [ -n "$issue_number" ]; then
+                local body
+                body=$(printf '**Task blocked by merge conflict.**\n\nFailed to merge `%s` (from task \`%s\`).\n\nConflicting files: `%s`\n\nRalph has skipped this iteration. Resolve the conflict manually, then re-run.' \
+                    "$dep_branch" "$dep_id" "$files_csv")
+                gh issue comment "$issue_number" --repo "$TARGET_REPO" --body "$body" >/dev/null 2>&1 || true
+                node "$SCRIPT_DIR/lib/github/index.js" add-label \
+                    --repo "$TARGET_REPO" --issue "$issue_number" --label "blocked" >/dev/null 2>&1 || true
+            fi
+
+            CURRENT_TASK_MERGE_CONFLICT=true
+            return 1
+        fi
+
+        dep_idx=$((dep_idx + 1))
+    done
+
+    return 0
+}
+
 # Commit the current working tree for this iteration with Ralph trailers.
 # Args: $1=task_id $2=task_index $3=iteration $4=verify_result_json $5=ralph_status
 # ralph_status must be one of: in-progress | passed | failed
@@ -2236,6 +2352,14 @@ run_ralph_loop() {
         # Phase 5: snapshot working tree + switch to task branch
         snapshot_working_tree
         ensure_task_branch "$next_task_id" "$task_index"
+        # Phase 6: merge completed dependency branches. On conflict: log, comment, skip iteration.
+        if ! merge_dependency_branches "$next_task_id" "$task_index"; then
+            log_iteration_result "$iteration" "$next_task_id" "BLOCKED" "Merge conflict — see issue comment"
+            restore_working_tree
+            rm -f "${JSON_FILE}.pre-iteration"
+            iteration=$((iteration + 1))
+            continue
+        fi
 
         # Log iteration start
         log_iteration "$iteration" "$next_task_id" "$task_title"
