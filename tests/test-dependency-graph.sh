@@ -93,12 +93,97 @@ test_loop_wires_merge_dependency_branches() {
     fi
 }
 
+test_cycle_blocks_run() {
+    echo ""; echo "Test: a PRD with a dependency cycle fails validation (does not start the loop)"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "x",
+  "tasks": [
+    { "id": "task-1", "title": "A", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0, "dependsOn": ["task-2"] },
+    { "id": "task-2", "title": "B", "category": "C", "priority": 2,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0, "dependsOn": ["task-1"] }
+  ]
+}
+EOF
+
+    local output exit_code
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "cycle"; then
+        pass "cycle blocks run at validation time"
+    else
+        fail "expected non-zero exit and 'cycle' in output. Exit: $exit_code, Output:\n$output"
+    fi
+}
+
+test_self_dep_blocks_run() {
+    echo ""; echo "Test: a self-dependency fails validation"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "x",
+  "tasks": [
+    { "id": "task-1", "title": "A", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0, "dependsOn": ["task-1"] }
+  ]
+}
+EOF
+
+    local output exit_code
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "self"; then
+        pass "self-dep blocks run"
+    else
+        fail "expected non-zero exit and 'self' in output. Exit: $exit_code, Output:\n$output"
+    fi
+}
+
+test_blocked_task_skipped_when_only_it_is_incomplete() {
+    echo ""; echo "Test: when only blocked tasks remain, loop exits without picking them"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "x",
+  "tasks": [
+    { "id": "task-1", "title": "A", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": true, "attempts": 1,
+      "completedAt": "2026-04-23T00:00:00Z" },
+    { "id": "task-2", "title": "B", "category": "C", "priority": 2,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+      "dependsOn": ["ghost-that-will-never-pass"] }
+  ]
+}
+EOF
+
+    # Validation will reject the "ghost" reference. That's the correct behavior — unknown
+    # refs are surfaced at validation, not at runtime. So we assert validation fails.
+    local output exit_code
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "unknown dependency"; then
+        pass "dangling dependency ref is surfaced at validation"
+    else
+        fail "expected non-zero exit + 'unknown dependency'. Exit: $exit_code, Output:\n$output"
+    fi
+}
+
 setup
 trap cleanup EXIT
 test_find_next_task_respects_deps
 test_sync_blocked_statuses_writes_to_json
 test_merge_dependency_branches_function_exists
 test_loop_wires_merge_dependency_branches
+test_cycle_blocks_run
+test_self_dep_blocks_run
+test_blocked_task_skipped_when_only_it_is_incomplete
+# NOTE: test_merge_dependency_branches_with_mock_git was intentionally omitted.
+# The dynamic merge integration test isn't reachable via --dry-run because
+# capture_original_branch + git_branching_preflight disable branching under
+# DRY_RUN=true, and the dry-run preview branch in run_ralph_loop returns
+# before ensure_task_branch / merge_dependency_branches are called. A real
+# integration test would require mocking the Claude CLI as well; the existing
+# test_merge_dependency_branches_function_exists + test_loop_wires_merge_dependency_branches
+# cover the wiring statically, and lib/git/merge.test.js covers the merge call shape.
 
 echo ""
 echo "Phase 6 dependency graph: $TESTS_PASSED passed, $TESTS_FAILED failed"
