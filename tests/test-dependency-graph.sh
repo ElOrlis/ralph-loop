@@ -167,6 +167,61 @@ EOF
     fi
 }
 
+test_merge_dependency_branches_invokes_git_merge() {
+    echo ""; echo "Test: merge_dependency_branches invokes 'git merge' with the dep's branchName"
+
+    # Shadow-PATH: symlink mock-git.sh as 'git' so both ralph-loop's direct git
+    # calls and lib/git/merge.js's execSync('git merge ...') hit the fixture.
+    local bindir="$TEST_DIR/mock-bin"
+    mkdir -p "$bindir"
+    ln -sf "$PROJECT_ROOT/tests/fixtures/mock-git.sh" "$bindir/git"
+
+    export MOCK_GIT_CALL_LOG="$TEST_DIR/git-calls.log"
+    : > "$MOCK_GIT_CALL_LOG"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "x",
+  "ralphGitMeta": { "originalBranch": "main", "prdSlug": "x" },
+  "tasks": [
+    { "id": "task-1", "title": "First", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": true, "attempts": 1,
+      "branchName": "ralph/x/task-1-first", "completedAt": "2026-04-23T00:00:00Z" },
+    { "id": "task-2", "title": "Second", "category": "C", "priority": 2,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+      "dependsOn": ["task-1"], "branchName": "ralph/x/task-2-second" }
+  ]
+}
+EOF
+
+    # Source ralph-loop in a subshell so the `set -euo pipefail` and script-level
+    # state don't leak. The guard at the bottom of ralph-loop prevents main from
+    # firing when BASH_SOURCE != $0, so we can call merge_dependency_branches
+    # directly with mid-iteration state.
+    (
+        export PATH="$bindir:$PATH"
+        # shellcheck disable=SC1090
+        source "$RALPH_LOOP"
+        JSON_FILE="$TEST_DIR/prd.json"
+        SCRIPT_DIR="$PROJECT_ROOT"
+        BRANCH_ENABLED=true
+        CURRENT_TASK_BRANCH="ralph/x/task-2-second"
+        GITHUB_ENABLED=false
+        TARGET_REPO=""
+        VERBOSE=false
+        DEBUG=false
+        merge_dependency_branches "task-2" "1"
+    ) || true
+
+    if grep -q "merge --no-edit" "$MOCK_GIT_CALL_LOG" && grep -q "ralph/x/task-1-first" "$MOCK_GIT_CALL_LOG"; then
+        pass "git merge --no-edit <dep-branch> was invoked"
+    else
+        fail "expected mock-git to log a merge of task-1's branch. Log:\n$(cat "$MOCK_GIT_CALL_LOG")"
+    fi
+
+    unset MOCK_GIT_CALL_LOG
+}
+
 setup
 trap cleanup EXIT
 test_find_next_task_respects_deps
@@ -176,14 +231,7 @@ test_loop_wires_merge_dependency_branches
 test_cycle_blocks_run
 test_self_dep_blocks_run
 test_blocked_task_skipped_when_only_it_is_incomplete
-# NOTE: test_merge_dependency_branches_with_mock_git was intentionally omitted.
-# The dynamic merge integration test isn't reachable via --dry-run because
-# capture_original_branch + git_branching_preflight disable branching under
-# DRY_RUN=true, and the dry-run preview branch in run_ralph_loop returns
-# before ensure_task_branch / merge_dependency_branches are called. A real
-# integration test would require mocking the Claude CLI as well; the existing
-# test_merge_dependency_branches_function_exists + test_loop_wires_merge_dependency_branches
-# cover the wiring statically, and lib/git/merge.test.js covers the merge call shape.
+test_merge_dependency_branches_invokes_git_merge
 
 echo ""
 echo "Phase 6 dependency graph: $TESTS_PASSED passed, $TESTS_FAILED failed"

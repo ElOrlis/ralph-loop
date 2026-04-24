@@ -2898,5 +2898,7 @@ main() {
     run_ralph_loop
 }
 
-# Run main
-main "$@"
+# Run main when executed directly; allow sourcing for unit tests.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
