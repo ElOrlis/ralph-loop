@@ -359,6 +359,7 @@ convert_prd_to_json() {
     local current_task_priority=""
     local current_task_description=""
     local current_criteria=()
+    local current_task_depends_on=""
 
     # Start building JSON
     local json_content='{'
@@ -385,6 +386,27 @@ convert_prd_to_json() {
                 json_content+='"category": "'"${current_task_category:-Uncategorized}"'",'
                 json_content+='"priority": '${current_task_priority:-999}','
                 json_content+='"description": "'"${current_task_description//\"/\\\"}"'",'
+                # Phase 6: emit dependsOn if the Depends On line had any content
+                if [ -n "$current_task_depends_on" ]; then
+                    # split on commas, trim whitespace from each, drop empties
+                    local deps_json="["
+                    local deps_first=true
+                    local IFS=','
+                    for dep in $current_task_depends_on; do
+                        # trim leading/trailing whitespace
+                        dep="${dep#"${dep%%[![:space:]]*}"}"
+                        dep="${dep%"${dep##*[![:space:]]}"}"
+                        if [ -z "$dep" ]; then continue; fi
+                        if [ "$deps_first" = false ]; then deps_json+=","; fi
+                        deps_first=false
+                        deps_json+="\"${dep//\"/\\\"}\""
+                    done
+                    deps_json+="]"
+                    if [ "$deps_first" = false ]; then
+                        json_content+='"dependsOn": '"$deps_json"','
+                    fi
+                    unset IFS
+                fi
                 json_content+='"acceptanceCriteria": ['
 
                 local first_criteria=true
@@ -410,6 +432,7 @@ convert_prd_to_json() {
             current_task_priority=""
             current_task_description=""
             current_criteria=()
+            current_task_depends_on=""
 
         # Check for Category
         elif [[ "$line" =~ ^\*\*Category\*\*:[[:space:]]*(.+)$ ]]; then
@@ -418,6 +441,10 @@ convert_prd_to_json() {
         # Check for Priority
         elif [[ "$line" =~ ^\*\*Priority\*\*:[[:space:]]*([0-9]+)$ ]]; then
             current_task_priority="${BASH_REMATCH[1]}"
+
+        # Check for Depends On
+        elif [[ "$line" =~ ^\*\*Depends[[:space:]]+On\*\*:[[:space:]]*(.*)$ ]]; then
+            current_task_depends_on="${BASH_REMATCH[1]}"
 
         # Check for Acceptance Criteria header
         elif [[ "$line" =~ ^###[[:space:]]+Acceptance[[:space:]]+Criteria ]]; then
@@ -452,6 +479,27 @@ convert_prd_to_json() {
         json_content+='"category": "'"${current_task_category:-Uncategorized}"'",'
         json_content+='"priority": '${current_task_priority:-999}','
         json_content+='"description": "'"${current_task_description//\"/\\\"}"'",'
+        # Phase 6: emit dependsOn if the Depends On line had any content
+        if [ -n "$current_task_depends_on" ]; then
+            # split on commas, trim whitespace from each, drop empties
+            local deps_json="["
+            local deps_first=true
+            local IFS=','
+            for dep in $current_task_depends_on; do
+                # trim leading/trailing whitespace
+                dep="${dep#"${dep%%[![:space:]]*}"}"
+                dep="${dep%"${dep##*[![:space:]]}"}"
+                if [ -z "$dep" ]; then continue; fi
+                if [ "$deps_first" = false ]; then deps_json+=","; fi
+                deps_first=false
+                deps_json+="\"${dep//\"/\\\"}\""
+            done
+            deps_json+="]"
+            if [ "$deps_first" = false ]; then
+                json_content+='"dependsOn": '"$deps_json"','
+            fi
+            unset IFS
+        fi
         json_content+='"acceptanceCriteria": ['
 
         local first_criteria=true
