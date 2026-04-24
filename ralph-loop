@@ -1772,26 +1772,24 @@ show_progress() {
 
 # Find highest-priority incomplete task
 find_next_task() {
-    local prd_content=$(cat "$JSON_FILE")
-    local task_count=$(echo "$prd_content" | jq '.tasks | length')
-    local task_index=0
-    local highest_priority_task=""
-    local highest_priority=999999
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/deps/index.js" next-task --task-file "$JSON_FILE" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${RED}[ERROR] Dependency graph evaluation failed: $reply${NC}" >&2
+        echo ""
+        return
+    fi
 
-    while [ $task_index -lt $task_count ]; do
-        local task=$(echo "$prd_content" | jq ".tasks[$task_index]")
-        local task_passes=$(echo "$task" | jq -r '.passes')
-        local task_priority=$(echo "$task" | jq -r '.priority')
+    local cycle
+    cycle=$(echo "$reply" | jq -r '.cycle // empty')
+    if [ -n "$cycle" ]; then
+        echo -e "${RED}[ERROR] Dependency cycle detected among tasks: $(echo "$reply" | jq -r '.cycle | join(" -> ")')${NC}" >&2
+        echo ""
+        return
+    fi
 
-        if [ "$task_passes" = "false" ] && [ "$task_priority" -lt "$highest_priority" ]; then
-            highest_priority=$task_priority
-            highest_priority_task=$(echo "$task" | jq -r '.id')
-        fi
-
-        task_index=$((task_index + 1))
-    done
-
-    echo "$highest_priority_task"
+    echo "$reply" | jq -r '.nextTask // empty'
 }
 
 # Get task details by ID
