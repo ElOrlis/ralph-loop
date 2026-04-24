@@ -102,6 +102,17 @@ OPTIONS:
     commit and flips to ready-for-review when all criteria pass. Use
     --no-branch to disable; --no-github also implies --no-branch.
 
+  Dependency Graph (Phase 6):
+    Tasks may declare dependencies with "**Depends On**: task-1, task-2" in
+    markdown (or a dependsOn array in JSON). Ralph's task picker replaces the
+    priority-only order with a topological sort: a task is only picked when
+    every task in its dependsOn list has passes=true. Blocked tasks show up
+    in progress output, get a "blocked" GitHub issue label, and a "Blocked"
+    Ralph Status on the project board. If branching is enabled, completed
+    dependency branches are merged into the task branch before Claude's turn;
+    on merge conflict Ralph records the conflict, marks the task blocked, and
+    moves on. Cycles are caught by --analyze-prd and by validate_prd_json.
+
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
 ╚════════════════════════════════════════════════════════════════════════════╝
