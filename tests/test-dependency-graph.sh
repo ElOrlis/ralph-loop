@@ -41,9 +41,44 @@ EOF
     fi
 }
 
+test_sync_blocked_statuses_writes_to_json() {
+    echo ""; echo "Test: after one iteration, blocked tasks have status=blocked + blockedBy populated"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "x",
+  "tasks": [
+    { "id": "task-1", "title": "First", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0 },
+    { "id": "task-2", "title": "Second", "category": "C", "priority": 2,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+      "dependsOn": ["task-1"] }
+  ]
+}
+EOF
+
+    # --dry-run still exercises sync_blocked_statuses (it runs before find_next_task).
+    "$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github >/dev/null 2>&1 || true
+
+    local t1_status t2_status t2_blocked_by
+    t1_status=$(jq -r '.tasks[0].status // empty' "$TEST_DIR/prd.json")
+    t2_status=$(jq -r '.tasks[1].status // empty' "$TEST_DIR/prd.json")
+    t2_blocked_by=$(jq -c '.tasks[1].blockedBy // empty' "$TEST_DIR/prd.json")
+
+    if [ "$t1_status" = "ready" ]; then pass "task-1 marked ready"
+    else fail "task-1 status should be ready, got: $t1_status"; fi
+
+    if [ "$t2_status" = "blocked" ]; then pass "task-2 marked blocked"
+    else fail "task-2 status should be blocked, got: $t2_status"; fi
+
+    if [ "$t2_blocked_by" = '["task-1"]' ]; then pass "task-2 blockedBy = [task-1]"
+    else fail "task-2 blockedBy should be [\"task-1\"], got: $t2_blocked_by"; fi
+}
+
 setup
 trap cleanup EXIT
 test_find_next_task_respects_deps
+test_sync_blocked_statuses_writes_to_json
 
 echo ""
 echo "Phase 6 dependency graph: $TESTS_PASSED passed, $TESTS_FAILED failed"

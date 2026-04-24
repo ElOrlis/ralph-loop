@@ -1951,6 +1951,53 @@ ensure_project_item() {
     fi
 }
 
+# Phase 6: persist status="ready"|"blocked" and blockedBy into PRD JSON
+# for every task, based on the latest dep-graph reply.
+sync_blocked_statuses() {
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/deps/index.js" next-task --task-file "$JSON_FILE" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${YELLOW}[WARN] sync_blocked_statuses: dep-graph call failed: $reply${NC}"
+        fi
+        return 0
+    fi
+
+    local cycle
+    cycle=$(echo "$reply" | jq -r '.cycle // empty')
+    if [ -n "$cycle" ]; then
+        # Don't mutate statuses when the graph is broken — validation surfaces this elsewhere.
+        return 0
+    fi
+
+    # Build {taskId: blockedBy[]} map from reply.blocked, then update every task.
+    local blocked_map
+    blocked_map=$(echo "$reply" | jq '[.blocked[] | {(.id): .blockedBy}] | add // {}')
+    local ready_ids
+    ready_ids=$(echo "$reply" | jq -c '.ready')
+
+    local updated
+    updated=$(jq \
+        --argjson blocked "$blocked_map" \
+        --argjson ready "$ready_ids" \
+        '
+        .tasks |= map(
+            .id as $id |
+            if .passes == true then
+                . + { status: "ready", blockedBy: [] }
+            elif ($blocked[$id]) then
+                . + { status: "blocked", blockedBy: $blocked[$id] }
+            elif (($ready | index($id)) != null) then
+                . + { status: "ready", blockedBy: [] }
+            else
+                . + { status: "ready", blockedBy: [] }
+            end
+        )
+        ' "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+}
+
 # Post iteration results as a comment on the task's GitHub issue
 post_iteration_comment() {
     local task_id="$1"
@@ -2091,6 +2138,8 @@ run_ralph_loop() {
     local start_time=$(date +%s)
     capture_original_branch
     git_branching_preflight
+    # Phase 6: initial status sync (so --dry-run + --analyze-prd see current blocked set)
+    sync_blocked_statuses
     local iteration=1
 
     # If resuming, start from last iteration + 1
@@ -2122,6 +2171,9 @@ run_ralph_loop() {
         if [ "$VERBOSE" = true ]; then
             echo -e "${BLUE}[INFO] Starting iteration $iteration/$MAX_ITERATIONS${NC}"
         fi
+
+        # Phase 6: refresh status / blockedBy on every task before picking one.
+        sync_blocked_statuses
 
         # Find next task to work on
         local next_task_id=$(find_next_task)
@@ -2666,6 +2718,9 @@ main() {
     # Validate PRD JSON structure
     validate_prd_json "$JSON_FILE"
     echo -e "${GREEN}✓${NC} PRD validation passed"
+
+    # Phase 6: persist blocked/ready statuses so --analyze-prd reports them
+    sync_blocked_statuses
 
     # Resolve GitHub repository
     resolve_target_repo
