@@ -1504,6 +1504,30 @@ analyze_prd() {
     fi
     echo ""
 
+    # Phase 6: dependency graph report
+    local deps_reply
+    local deps_exit=0
+    deps_reply=$(node "$SCRIPT_DIR/lib/deps/index.js" next-task --task-file "$json_file" 2>&1) || deps_exit=$?
+    if [ $deps_exit -eq 0 ] && [ -n "$deps_reply" ]; then
+        local cycle
+        cycle=$(echo "$deps_reply" | jq -r '.cycle // empty')
+        local ready_count blocked_count
+        ready_count=$(echo "$deps_reply" | jq '.ready | length')
+        blocked_count=$(echo "$deps_reply" | jq '.blocked | length')
+
+        echo -e "${BLUE}Dependency Analysis:${NC}"
+        echo "  Ready (unblocked): $ready_count"
+        echo "  Blocked (waiting on deps): $blocked_count"
+        if [ "$blocked_count" -gt 0 ]; then
+            echo "  Blocked tasks:"
+            echo "$deps_reply" | jq -r '.blocked[] | "    - \(.id) blocked by: \(.blockedBy | join(", "))"'
+        fi
+        if [ -n "$cycle" ]; then
+            echo -e "  ${RED}⚠ Dependency cycle detected: $(echo "$deps_reply" | jq -r '.cycle | join(" -> ")')${NC}"
+        fi
+        echo ""
+    fi
+
     # Create analysis prompt for Claude
     local analysis_prompt="You are a PRD quality analyzer. Analyze the following Product Requirements Document (PRD) and provide detailed feedback on its quality.
 
