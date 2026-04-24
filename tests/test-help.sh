@@ -260,6 +260,20 @@ test_flag_examples() {
     fi
 }
 
+# Test 14: Help documents Phase 5 branching
+test_help_documents_phase5() {
+    echo ""
+    echo "Test 14: --help includes Phase 5 section"
+
+    ../ralph-loop --help > "$TEST_DIR/help-phase5.txt" 2>&1 || true
+
+    if grep -q "Git Branching & PRs" "$TEST_DIR/help-phase5.txt"; then
+        pass "help documents Phase 5"
+    else
+        fail "help does not mention Git Branching & PRs"
+    fi
+}
+
 # Main test execution
 main() {
     echo "========================================"
@@ -281,6 +295,7 @@ main() {
     test_files_created
     test_troubleshooting_coverage
     test_flag_examples
+    test_help_documents_phase5
 
     cleanup
 

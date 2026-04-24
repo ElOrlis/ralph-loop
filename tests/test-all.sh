@@ -39,6 +39,9 @@ TEST_SCRIPTS=(
     "test-dry-run.sh"
     "test-github.sh"
     "test-github-projects.sh"
+    "test-branching-flags.sh"
+    "test-git-branching.sh"
+    "test-phase5-failed-iteration.sh"
 )
 
 # Run each test suite

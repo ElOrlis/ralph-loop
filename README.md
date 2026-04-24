@@ -544,6 +544,36 @@ for the full schema.
 **Rate limiting:** API call counts print at end of each run. A warning prints
 at 100 calls. Use `--no-github` to skip all GitHub/Projects activity.
 
+## Phase 5 — Git Branching & PRs
+
+Every task gets its own branch:
+
+```
+ralph/<prd-slug>/<task-id>-<title-slug>
+```
+
+...forked off the branch you ran Ralph from. Each iteration is a separate
+commit with structured trailers:
+
+```
+task-3: add JWT validation middleware
+
+Iteration 2/15. Criteria: 2/3 passing.
+
+Ralph-Task-Id: task-3
+Ralph-Issue: #42
+Ralph-Status: in-progress
+```
+
+`Ralph-Status` is one of `in-progress`, `passed`, or `failed`. A draft pull
+request opens after the first commit and links back to the task issue via a
+`Closes #<issueNumber>` trailer. When all acceptance criteria pass, Ralph
+flips the PR to ready-for-review via `gh pr ready`. Failed iterations (JSON
+corruption, etc.) still produce a commit with `Ralph-Status: failed` so the
+history is complete.
+
+Disable entirely with `--no-branch`. `--no-github` also implies `--no-branch`.
+
 ## Contributing
 
 Contributions are welcome! Here's how to contribute:

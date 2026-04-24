@@ -384,6 +384,58 @@ EOF
     fi
 }
 
+# Test 11: Accepts optional ralphGitMeta + task-level branchName/prNumber/prUrl
+test_accepts_ralph_git_meta() {
+    echo ""
+    echo "Test 11: accepts optional ralphGitMeta + task-level branchName/prNumber/prUrl"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "Phase 5 schema",
+  "ralphGitMeta": { "originalBranch": "main", "prdSlug": "phase-5-schema" },
+  "tasks": [{
+    "id": "task-1", "title": "T", "category": "C", "priority": 1,
+    "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+    "branchName": "ralph/phase-5-schema/task-1-t",
+    "prNumber": 17,
+    "prUrl": "https://github.com/o/r/pull/17"
+  }]
+}
+EOF
+
+    local output exit_code
+    output=$(../ralph-loop "$TEST_DIR/prd.json" --dry-run 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then
+        pass "accepts ralphGitMeta + branch fields"
+    else
+        fail "rejected valid PRD with Phase 5 fields. Output: $output"
+    fi
+}
+
+# Test 12: Rejects non-string branchName
+test_rejects_bad_branch_name_type() {
+    echo ""
+    echo "Test 12: rejects non-string branchName"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "Bad", "tasks": [{
+    "id": "task-1", "title": "T", "category": "C", "priority": 1,
+    "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+    "branchName": 42
+  }]
+}
+EOF
+
+    local output exit_code
+    output=$(../ralph-loop "$TEST_DIR/prd.json" --dry-run 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -q "branchName"; then
+        pass "rejects non-string branchName"
+    else
+        fail "should reject non-string branchName. Exit: $exit_code, Output: $output"
+    fi
+}
+
 # Main test execution
 main() {
     echo "========================================"
@@ -402,6 +454,8 @@ main() {
     test_priority_type
     test_githubproject_requires_all_fields
     test_projectitem_id_must_be_string
+    test_accepts_ralph_git_meta
+    test_rejects_bad_branch_name_type
 
     cleanup
 

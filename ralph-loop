@@ -21,6 +21,10 @@ TARGET_REPO=""
 GITHUB_API_CALLS=0
 GITHUB_API_WARN_THRESHOLD=100
 GITHUB_API_WARNED=false
+BRANCH_ENABLED=true
+ORIGINAL_BRANCH=""
+CURRENT_TASK_BRANCH=""
+STASH_APPLIED=false
 PRD_FILE=""
 JSON_FILE=""
 PROGRESS_FILE=""
@@ -79,6 +83,8 @@ OPTIONS:
   --help                  Show this help message
   --dry-run               Show next prompt and exit (don't call Claude)
   --no-github             Disable all GitHub integration
+  --no-branch             Disable per-task git branching and PR creation
+                          (automatically set by --no-github)
   --repo owner/name      Override target GitHub repository
                           (default: PRD "repository" field or git remote origin)
 
@@ -88,6 +94,13 @@ OPTIONS:
     and syncs Priority, Category, Iteration Count, Criteria Pass Rate, and
     Ralph Status fields after every iteration. GitHub API calls are reported
     at end of run; a warning prints at 100 calls.
+
+  Git Branching & PRs (Phase 5):
+    Each task gets its own branch (ralph/<prd>/<task>-<slug>) off the caller's
+    current branch. Each iteration is a separate commit with Ralph-Task-Id,
+    Ralph-Issue, and Ralph-Status trailers. A draft PR opens after the first
+    commit and flips to ready-for-review when all criteria pass. Use
+    --no-branch to disable; --no-github also implies --no-branch.
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
@@ -258,6 +271,11 @@ parse_arguments() {
                 ;;
             --no-github)
                 GITHUB_ENABLED=false
+                BRANCH_ENABLED=false
+                shift
+                ;;
+            --no-branch)
+                BRANCH_ENABLED=false
                 shift
                 ;;
             --repo)
@@ -604,6 +622,41 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
         return 1
     fi
 
+    # Optional: ralphGitMeta must be object with originalBranch (string) + prdSlug (string)
+    if jq -e '.ralphGitMeta' "$json_file" >/dev/null 2>&1; then
+        local gm_fields
+        for gm_fields in originalBranch prdSlug; do
+            if ! jq -e ".ralphGitMeta.$gm_fields | type == \"string\" and length > 0" "$json_file" >/dev/null 2>&1; then
+                echo -e "${RED}[ERROR] ralphGitMeta.$gm_fields must be a non-empty string${NC}"
+                return 1
+            fi
+        done
+    fi
+
+    # Optional: each task.branchName (if present) must be non-empty string
+    local branch_bad
+    branch_bad=$(jq -r '.tasks[] | select(.branchName != null) | select((.branchName | type) != "string" or (.branchName | length) == 0) | .id' "$json_file")
+    if [ -n "$branch_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with invalid branchName: $branch_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.prNumber (if present) must be a positive integer
+    local pr_bad
+    pr_bad=$(jq -r '.tasks[] | select(.prNumber != null) | select((.prNumber | type) != "number" or .prNumber <= 0 or (.prNumber | floor) != .prNumber) | .id' "$json_file")
+    if [ -n "$pr_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with invalid prNumber: $pr_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.prUrl (if present) must be string
+    local prurl_bad
+    prurl_bad=$(jq -r '.tasks[] | select(.prUrl != null) | select((.prUrl | type) != "string") | .id' "$json_file")
+    if [ -n "$prurl_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with non-string prUrl: $prurl_bad${NC}"
+        return 1
+    fi
+
     return 0
 }
 
@@ -782,6 +835,362 @@ validate_project_fields() {
         echo -e "${GREEN}[INFO] Repaired missing project fields: $missing_csv${NC}"
     elif [ "$VERBOSE" = true ]; then
         echo -e "${BLUE}[INFO] Project fields validated.${NC}"
+    fi
+}
+
+# Capture and persist the caller's branch + PRD slug on PRD root
+capture_original_branch() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ "$DRY_RUN" = true ]; then return 0; fi
+
+    local existing
+    existing=$(jq -r '.ralphGitMeta.originalBranch // empty' "$JSON_FILE")
+    if [ -n "$existing" ]; then
+        ORIGINAL_BRANCH="$existing"
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] Using stored originalBranch: $ORIGINAL_BRANCH${NC}"
+        fi
+        return 0
+    fi
+
+    local current
+    local current_exit=0
+    current=$(node "$SCRIPT_DIR/lib/git/index.js" current-branch 2>&1) || current_exit=$?
+    if [ $current_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] Could not determine current git branch: $current${NC}"
+        echo -e "${YELLOW}[WARN] Disabling branching for this run.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+    ORIGINAL_BRANCH=$(echo "$current" | jq -r '.branch')
+    if [ -z "$ORIGINAL_BRANCH" ] || [ "$ORIGINAL_BRANCH" = "null" ]; then
+        echo -e "${YELLOW}[WARN] current-branch returned empty/null. Disabling branching.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+
+    local prd_base
+    prd_base=$(basename "$PRD_FILE")
+    prd_base="${prd_base%.*}"
+    local slug_reply
+    slug_reply=$(node "$SCRIPT_DIR/lib/git/index.js" slugify --input "$prd_base" 2>&1) || {
+        echo -e "${YELLOW}[WARN] slugify failed: $slug_reply${NC}"; BRANCH_ENABLED=false; return 0;
+    }
+    local prd_slug
+    prd_slug=$(echo "$slug_reply" | jq -r '.slug')
+    if [ -z "$prd_slug" ] || [ "$prd_slug" = "null" ]; then
+        echo -e "${YELLOW}[WARN] Could not derive prdSlug from $prd_base. Disabling branching.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+
+    local updated
+    updated=$(jq --arg b "$ORIGINAL_BRANCH" --arg s "$prd_slug" \
+        '.ralphGitMeta = {originalBranch: $b, prdSlug: $s}' "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Captured originalBranch=$ORIGINAL_BRANCH, prdSlug=$prd_slug${NC}"
+    fi
+}
+
+# One-shot preflight: abort branching if prerequisites (git CLI, clean-enough state) aren't met
+git_branching_preflight() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if ! command -v git >/dev/null 2>&1; then
+        echo -e "${YELLOW}[WARN] git CLI not found. Disabling branching.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+    if [ -z "$ORIGINAL_BRANCH" ]; then
+        echo -e "${YELLOW}[WARN] ORIGINAL_BRANCH is empty. Disabling branching.${NC}"
+        BRANCH_ENABLED=false
+        return 0
+    fi
+}
+
+# Snapshot working tree before switching to a task branch
+snapshot_working_tree() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+
+    STASH_APPLIED=false
+    local dirty_reply
+    dirty_reply=$(node "$SCRIPT_DIR/lib/git/index.js" has-uncommitted 2>&1) || return 0
+    local dirty
+    dirty=$(echo "$dirty_reply" | jq -r '.dirty')
+
+    if [ "$dirty" = "true" ]; then
+        local ts=$(date +%s)
+        local push_reply
+        push_reply=$(node "$SCRIPT_DIR/lib/git/index.js" stash-push --message "ralph-loop-iter-$ts" 2>&1) || {
+            echo -e "${YELLOW}[WARN] stash-push failed: $push_reply. Continuing without stash.${NC}"
+            STASH_APPLIED=false
+            return 0
+        }
+        local stashed
+        stashed=$(echo "$push_reply" | jq -r '.stashed')
+        STASH_APPLIED="$stashed"
+        if [ "$VERBOSE" = true ] && [ "$stashed" = "true" ]; then
+            echo -e "${BLUE}[INFO] Stashed uncommitted changes before branch switch${NC}"
+        fi
+    fi
+}
+
+# Ensure a task branch exists and switch to it. Persists task.branchName.
+ensure_task_branch() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+
+    local prd_slug
+    prd_slug=$(jq -r '.ralphGitMeta.prdSlug // empty' "$JSON_FILE")
+    if [ -z "$prd_slug" ]; then
+        echo -e "${YELLOW}[WARN] prdSlug missing; skipping branch for $task_id.${NC}"
+        return 0
+    fi
+
+    local task_title
+    task_title=$(jq -r ".tasks[$task_index].title" "$JSON_FILE")
+
+    local existing_branch
+    existing_branch=$(jq -r ".tasks[$task_index].branchName // empty" "$JSON_FILE")
+
+    local branch_name
+    if [ -n "$existing_branch" ]; then
+        branch_name="$existing_branch"
+    else
+        local name_reply
+        name_reply=$(node "$SCRIPT_DIR/lib/git/index.js" branch-name \
+            --prd-slug "$prd_slug" --task-id "$task_id" --title "$task_title" 2>&1) || {
+            echo -e "${YELLOW}[WARN] branch-name failed: $name_reply${NC}"
+            return 0
+        }
+        branch_name=$(echo "$name_reply" | jq -r '.branchName')
+        if [ -z "$branch_name" ] || [ "$branch_name" = "null" ]; then
+            echo -e "${YELLOW}[WARN] branch-name returned empty/null for $task_id; skipping branch creation.${NC}"
+            return 0
+        fi
+        local updated
+        updated=$(jq --argjson idx "$task_index" --arg n "$branch_name" \
+            '.tasks[$idx].branchName = $n' "$JSON_FILE")
+        echo "$updated" | jq '.' > "$JSON_FILE"
+    fi
+
+    local ensure_reply
+    ensure_reply=$(node "$SCRIPT_DIR/lib/git/index.js" ensure-branch \
+        --name "$branch_name" --base "$ORIGINAL_BRANCH" 2>&1) || {
+        echo -e "${YELLOW}[WARN] ensure-branch failed: $ensure_reply${NC}"
+        return 0
+    }
+    local created
+    created=$(echo "$ensure_reply" | jq -r '.created')
+
+    node "$SCRIPT_DIR/lib/git/index.js" switch-to --name "$branch_name" >/dev/null 2>&1 || {
+        echo -e "${YELLOW}[WARN] Could not switch to $branch_name; branching disabled this iter.${NC}"
+        CURRENT_TASK_BRANCH=""
+        return 0
+    }
+    CURRENT_TASK_BRANCH="$branch_name"
+
+    if [ "$created" = "true" ]; then
+        emit_logging_event branch_created \
+            "{\"taskId\":\"$task_id\",\"branchName\":\"$branch_name\",\"baseBranch\":\"$ORIGINAL_BRANCH\"}"
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${GREEN}[INFO] Created branch $branch_name off $ORIGINAL_BRANCH${NC}"
+        fi
+    elif [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Switched to existing task branch: $branch_name${NC}"
+    fi
+}
+
+# Switch back to ORIGINAL_BRANCH and restore any stash pushed earlier
+restore_working_tree() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ -z "$ORIGINAL_BRANCH" ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+
+    node "$SCRIPT_DIR/lib/git/index.js" switch-to --name "$ORIGINAL_BRANCH" >/dev/null 2>&1 || {
+        echo -e "${YELLOW}[WARN] Could not switch back to $ORIGINAL_BRANCH.${NC}"
+        return 0
+    }
+    CURRENT_TASK_BRANCH=""
+
+    if [ "$STASH_APPLIED" = "true" ]; then
+        node "$SCRIPT_DIR/lib/git/index.js" stash-pop >/dev/null 2>&1 || {
+            echo -e "${YELLOW}[WARN] Could not pop ralph-loop stash. Run 'git stash list' to recover.${NC}"
+        }
+        STASH_APPLIED=false
+    fi
+}
+
+# Commit the current working tree for this iteration with Ralph trailers.
+# Args: $1=task_id $2=task_index $3=iteration $4=verify_result_json $5=ralph_status
+# ralph_status must be one of: in-progress | passed | failed
+commit_iteration() {
+    local task_id="$1"
+    local task_index="$2"
+    local iteration="$3"
+    local verify_result="$4"
+    local ralph_status="$5"
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+
+    local task_title
+    task_title=$(jq -r ".tasks[$task_index].title" "$JSON_FILE")
+    local issue_number
+    issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+
+    local pass_count=0
+    local total_count=0
+    if [ -n "$verify_result" ]; then
+        pass_count=$(echo "$verify_result" | jq '[.results[] | select(.passed == true)] | length' 2>/dev/null || echo 0)
+        total_count=$(echo "$verify_result" | jq '.results | length' 2>/dev/null || echo 0)
+    fi
+
+    local args=(
+        commit-iteration
+        --task-id "$task_id"
+        --task-title "$task_title"
+        --iteration "$iteration"
+        --max-iterations "$MAX_ITERATIONS"
+        --pass-count "$pass_count"
+        --total-count "$total_count"
+        --status "$ralph_status"
+        --skip-if-empty
+    )
+    if [ -n "$issue_number" ]; then
+        args+=(--issue "$issue_number")
+    fi
+
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/git/index.js" "${args[@]}" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] commit-iteration failed for $task_id: $reply${NC}"
+        return 0
+    fi
+
+    local sha skipped
+    sha=$(echo "$reply" | jq -r '.sha')
+    skipped=$(echo "$reply" | jq -r '.skipped')
+    if [ "$skipped" = "true" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] Nothing to commit for iter $iteration on $task_id${NC}"
+        fi
+        return 0
+    fi
+
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${GREEN}[INFO] Committed ${sha:0:7} on $CURRENT_TASK_BRANCH (status: $ralph_status)${NC}"
+    fi
+
+    emit_logging_event iteration_committed \
+        "{\"iteration\":$iteration,\"taskId\":\"$task_id\",\"branchName\":\"$CURRENT_TASK_BRANCH\",\"sha\":\"$sha\",\"ralphStatus\":\"$ralph_status\",\"criteriaPassCount\":$pass_count,\"criteriaTotal\":$total_count}"
+}
+
+# Push the current task branch to origin. Non-fatal on failure.
+push_task_branch() {
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+
+    local reply
+    reply=$(node "$SCRIPT_DIR/lib/git/index.js" push --branch "$CURRENT_TASK_BRANCH" 2>&1) || true
+    local ok
+    ok=$(echo "$reply" | jq -r '.ok' 2>/dev/null || echo "false")
+    if [ "$ok" != "true" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${YELLOW}[WARN] Could not push $CURRENT_TASK_BRANCH: $(echo "$reply" | jq -r '.error // empty')${NC}"
+        fi
+    fi
+}
+
+# Create a draft PR for a task if one doesn't yet exist. Persists prNumber + prUrl.
+ensure_task_pr() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+
+    local existing_pr
+    existing_pr=$(jq -r ".tasks[$task_index].prNumber // empty" "$JSON_FILE")
+    if [ -n "$existing_pr" ]; then return 0; fi
+
+    local task_title
+    task_title=$(jq -r ".tasks[$task_index].title" "$JSON_FILE")
+    local issue_number
+    issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+
+    local args=(
+        ensure-pr
+        --repo "$TARGET_REPO"
+        --branch "$CURRENT_TASK_BRANCH"
+        --base "$ORIGINAL_BRANCH"
+        --task-id "$task_id"
+        --task-title "$task_title"
+    )
+    if [ -n "$issue_number" ]; then
+        args+=(--issue "$issue_number")
+    fi
+
+    local reply reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" "${args[@]}" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] ensure-pr failed for $task_id: $reply${NC}"
+        return 0
+    fi
+
+    local pr_number pr_url created
+    pr_number=$(echo "$reply" | jq -r '.prNumber')
+    pr_url=$(echo "$reply" | jq -r '.prUrl')
+    created=$(echo "$reply" | jq -r '.created')
+
+    local updated
+    updated=$(jq --argjson idx "$task_index" --argjson n "$pr_number" --arg u "$pr_url" \
+        '.tasks[$idx].prNumber = $n | .tasks[$idx].prUrl = $u' "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+
+    if [ "$created" = "true" ]; then
+        emit_logging_event pr_created \
+            "{\"taskId\":\"$task_id\",\"prNumber\":$pr_number,\"prUrl\":\"$pr_url\",\"branchName\":\"$CURRENT_TASK_BRANCH\"}"
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${GREEN}[INFO] Created draft PR #$pr_number: $pr_url${NC}"
+        fi
+    elif [ "$VERBOSE" = true ]; then
+        echo -e "${BLUE}[INFO] Reusing existing PR #$pr_number for $task_id${NC}"
+    fi
+}
+
+# Flip a task's draft PR to ready-for-review
+mark_pr_ready() {
+    local task_id="$1"
+    local task_index="$2"
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ "$GITHUB_ENABLED" = false ]; then return 0; fi
+    if [ -z "$TARGET_REPO" ]; then return 0; fi
+
+    local pr_number
+    pr_number=$(jq -r ".tasks[$task_index].prNumber // empty" "$JSON_FILE")
+    if [ -z "$pr_number" ]; then return 0; fi
+
+    local reply reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/github/index.js" mark-pr-ready \
+        --repo "$TARGET_REPO" --pr "$pr_number" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${YELLOW}[WARN] mark-pr-ready failed for $task_id: $reply${NC}"
+        return 0
+    fi
+
+    emit_logging_event pr_marked_ready \
+        "{\"taskId\":\"$task_id\",\"prNumber\":$pr_number}"
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${GREEN}[INFO] Marked PR #$pr_number ready for review${NC}"
     fi
 }
 
@@ -1595,6 +2004,8 @@ run_ralph_loop() {
     fi
 
     local start_time=$(date +%s)
+    capture_original_branch
+    git_branching_preflight
     local iteration=1
 
     # If resuming, start from last iteration + 1
@@ -1684,6 +2095,10 @@ run_ralph_loop() {
 
         # Ensure this task is in the GitHub project
         ensure_project_item "$next_task_id" "$task_index"
+
+        # Phase 5: snapshot working tree + switch to task branch
+        snapshot_working_tree
+        ensure_task_branch "$next_task_id" "$task_index"
 
         # Log iteration start
         log_iteration "$iteration" "$next_task_id" "$task_title"
@@ -1830,6 +2245,11 @@ Try again later or check Claude API status at https://status.anthropic.com"
         if [ $json_valid_exit -ne 0 ]; then
             echo -e "${YELLOW}⚠ JSON file corrupted during iteration. Restoring from snapshot.${NC}"
             cp "${JSON_FILE}.pre-iteration" "$JSON_FILE"
+            # Phase 5: commit the failed iteration with Ralph-Status: failed
+            commit_iteration "$next_task_id" "$task_index" "$iteration" "" "failed"
+            push_task_branch
+            ensure_task_pr "$next_task_id" "$task_index"
+            restore_working_tree
             log_iteration_result "$iteration" "$next_task_id" "FAILED" "JSON corrupted, restored from snapshot"
             iteration=$((iteration + 1))
             continue
@@ -1912,6 +2332,12 @@ Try again later or check Claude API status at https://status.anthropic.com"
             # Sync project fields
             sync_project_item "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
+            # Phase 5: commit + push + flip PR to ready
+            commit_iteration "$next_task_id" "$task_index" "$iteration" "$verify_result" "passed"
+            push_task_branch
+            ensure_task_pr "$next_task_id" "$task_index"
+            mark_pr_ready "$next_task_id" "$task_index"
+
             # Close the GitHub issue
             close_task_issue "$next_task_id" "$task_index" "$iteration"
 
@@ -1920,13 +2346,17 @@ Try again later or check Claude API status at https://status.anthropic.com"
             fi
         else
             # Some criteria failed — update results but keep passes=false
-            local updated_prd=$(jq \
+            local updated_prd
+            if ! updated_prd=$(jq \
                 --argjson idx "$task_index" \
                 --arg now "$now" \
                 --argjson results "$verify_result" \
                 '.tasks[$idx].criteriaResults = $results.results' \
-                "$JSON_FILE" 2>/dev/null || cat "$JSON_FILE")
-            echo "$updated_prd" | jq '.' > "$JSON_FILE" 2>/dev/null || true
+                "$JSON_FILE" 2>&1); then
+                echo -e "${YELLOW}[WARN] Could not merge criteria results into PRD JSON: $updated_prd${NC}"
+            else
+                echo "$updated_prd" | jq '.' > "$JSON_FILE"
+            fi
 
             log_iteration_result "$iteration" "$next_task_id" "IN PROGRESS" "Criteria verification: some failed"
 
@@ -1968,6 +2398,11 @@ Try again later or check Claude API status at https://status.anthropic.com"
             # Sync project fields
             sync_project_item "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
+            # Phase 5: commit in-progress state + push + open draft PR
+            commit_iteration "$next_task_id" "$task_index" "$iteration" "$verify_result" "in-progress"
+            push_task_branch
+            ensure_task_pr "$next_task_id" "$task_index"
+
             # Check for thrash
             local thrash_criterion
             if thrash_criterion=$(check_thrash "$next_task_id"); then
@@ -2004,6 +2439,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
         # Show progress visualization
         show_progress "$iteration" "$start_time"
 
+        # Phase 5: return to the caller's branch between iterations
+        restore_working_tree
+
         # Clean up iteration snapshot
         rm -f "${JSON_FILE}.pre-iteration"
 
@@ -2018,6 +2456,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
             sleep 2
         fi
     done
+
+    # Phase 5: ensure we're back on the caller's branch regardless of how the loop exited
+    restore_working_tree
 
     # Final check: Verify if all tasks are actually complete before declaring success/failure
     # This handles the case where the last iteration completed all tasks but didn't detect it
@@ -2128,6 +2569,7 @@ main() {
         echo -e "${BLUE}[DEBUG] DEBUG: $DEBUG${NC}"
         echo -e "${BLUE}[DEBUG] RESUME: $RESUME${NC}"
         echo -e "${BLUE}[DEBUG] ANALYZE_PRD: $ANALYZE_PRD${NC}"
+        echo -e "${BLUE}[DEBUG] BRANCH_ENABLED: $BRANCH_ENABLED${NC}"
     fi
 
     echo -e "${GREEN}✓${NC} Arguments validated successfully"
