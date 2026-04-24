@@ -735,6 +735,15 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
         return 1
     fi
 
+    # Phase 6: graph-level validation (unknown refs, self-deps, cycles)
+    local deps_reply
+    local deps_exit=0
+    deps_reply=$(node "$SCRIPT_DIR/lib/deps/index.js" validate --task-file "$json_file" 2>&1) || deps_exit=$?
+    if [ $deps_exit -ne 0 ]; then
+        echo -e "${RED}[ERROR] Dependency graph validation failed: $deps_reply${NC}"
+        return 1
+    fi
+
     return 0
 }
 
