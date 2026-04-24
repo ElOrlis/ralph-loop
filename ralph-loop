@@ -657,6 +657,36 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
         return 1
     fi
 
+    # Optional: each task.dependsOn (if present) must be an array of strings
+    local deps_bad
+    deps_bad=$(jq -r '.tasks[] | select(.dependsOn != null) | select((.dependsOn | type) != "array") | .id' "$json_file")
+    if [ -n "$deps_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with non-array dependsOn: $deps_bad${NC}"
+        return 1
+    fi
+    local deps_elem_bad
+    deps_elem_bad=$(jq -r '.tasks[] | select(.dependsOn != null) | select([.dependsOn[] | type] | any(. != "string")) | .id' "$json_file")
+    if [ -n "$deps_elem_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with non-string entries in dependsOn: $deps_elem_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.status (if present) must be "ready" or "blocked"
+    local status_bad
+    status_bad=$(jq -r '.tasks[] | select(.status != null) | select(.status != "ready" and .status != "blocked") | .id' "$json_file")
+    if [ -n "$status_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with invalid status (must be \"ready\" or \"blocked\"): $status_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.blockedBy (if present) must be an array of strings
+    local bb_bad
+    bb_bad=$(jq -r '.tasks[] | select(.blockedBy != null) | select((.blockedBy | type) != "array" or ([.blockedBy[] | type] | any(. != "string"))) | .id' "$json_file")
+    if [ -n "$bb_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with invalid blockedBy: $bb_bad${NC}"
+        return 1
+    fi
+
     return 0
 }
 
