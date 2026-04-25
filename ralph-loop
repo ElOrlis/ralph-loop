@@ -2303,6 +2303,19 @@ run_ralph_loop() {
         fi
     fi
 
+    # Generate MCP config once per run, alongside progress.txt.
+    if [ "$MCP_ENABLED" = true ]; then
+        local prd_dir
+        prd_dir="$(dirname "$JSON_FILE")"
+        MCP_CONFIG_FILE="${prd_dir}/mcp-config.json"
+        if ! node "$SCRIPT_DIR/lib/mcp/index.js" write-config --output "$MCP_CONFIG_FILE" > /dev/null; then
+            error_exit "Failed to write MCP config to $MCP_CONFIG_FILE" "Check filesystem permissions and rerun."
+        fi
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[VERBOSE] MCP enabled; config at $MCP_CONFIG_FILE${NC}"
+        fi
+    fi
+
     local start_time=$(date +%s)
     capture_original_branch
     git_branching_preflight
@@ -2448,6 +2461,11 @@ run_ralph_loop() {
         # Run claude with appropriate flags
         local api_start_time=$(date +%s)
 
+        local mcp_args=()
+        if [ "$MCP_ENABLED" = true ] && [ -n "$MCP_CONFIG_FILE" ]; then
+            mcp_args+=(--mcp-config "$MCP_CONFIG_FILE")
+        fi
+
         # Retry loop for API calls
         while [ $retry_count -lt $max_retries ] && [ "$api_success" = false ]; do
             if [ $retry_count -gt 0 ]; then
@@ -2466,7 +2484,7 @@ run_ralph_loop() {
                     echo ""
                 fi
                 echo -e "${BLUE}[DEBUG] Calling Claude API...${NC}"
-                if claude_output=$(claude --dangerously-skip-permissions --print < "$prompt_file" 2>&1); then
+                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
                     api_success=true
                     echo ""
                     echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -2489,14 +2507,14 @@ run_ralph_loop() {
                     echo ""
                 fi
                 echo -e "${BLUE}[VERBOSE] Calling Claude API...${NC}"
-                if claude_output=$(claude --dangerously-skip-permissions --print < "$prompt_file" 2>&1); then
+                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
                     api_success=true
                     echo -e "${GREEN}[VERBOSE] Claude API call completed${NC}"
                 else
                     claude_exit_code=$?
                 fi
             else
-                if claude_output=$(claude --dangerously-skip-permissions --print < "$prompt_file" 2>&1); then
+                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
                     api_success=true
                 else
                     claude_exit_code=$?

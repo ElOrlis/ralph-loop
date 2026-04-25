@@ -95,6 +95,83 @@ else
 fi
 rm -rf "$sandbox"
 
+# Helper: build a PATH that keeps core tools but strips any dir containing
+# the given binary names (so sandbox stubs are the only ones found).
+# Usage: make_isolated_path <sandbox> <bin1> [bin2 ...]
+make_isolated_path() {
+    local sandbox="$1"; shift
+    local exclude_bins=("$@")
+    local result="$sandbox/bin"
+    local dir bin skip _dirs
+    IFS=: read -ra _dirs <<< "$PATH"
+    for dir in "${_dirs[@]}"; do
+        skip=false
+        for bin in "${exclude_bins[@]}"; do
+            if [ -x "$dir/$bin" ]; then
+                skip=true
+                break
+            fi
+        done
+        "$skip" && continue
+        result="$result:$dir"
+    done
+    echo "$result"
+}
+
+# ---------------------------------------------------------------
+info "Test: --mcp passes --mcp-config to claude invocation"
+
+sandbox=$(make_sandbox)
+prd="$sandbox/prd.json"
+minimal_prd "$prd"
+record="$sandbox/claude-argv.txt"
+
+# Stub mcpls (just needs to exist on PATH).
+write_stub "$sandbox" mcpls 'exit 0'
+
+# Stub claude that records its argv and emits a "DONE" stdout so the loop
+# proceeds through one iteration cleanly.
+write_stub "$sandbox" claude "printf '%s\n' \"\$@\" > \"$record\"; echo DONE; exit 0"
+
+_isolated=$(make_isolated_path "$sandbox" mcpls claude)
+PATH="$_isolated" "$RALPH_LOOP" "$prd" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+
+if [ -f "$record" ] && grep -q -- "--mcp-config" "$record"; then
+    pass "claude was invoked with --mcp-config"
+else
+    fail "claude argv did not contain --mcp-config. Recorded: $(cat "$record" 2>/dev/null || echo MISSING)"
+fi
+
+# Validate the generated config file is well-formed JSON with the mcpls entry
+config_path=$(grep -A1 -- "--mcp-config" "$record" | tail -1)
+if [ -f "$config_path" ] && jq -e '.mcpServers.mcpls.command == "mcpls"' "$config_path" > /dev/null 2>&1; then
+    pass "generated mcp-config.json has expected shape"
+else
+    fail "mcp-config.json missing or malformed at: $config_path"
+fi
+
+rm -rf "$sandbox"
+
+# ---------------------------------------------------------------
+info "Test: without --mcp, claude is NOT invoked with --mcp-config"
+
+sandbox=$(make_sandbox)
+prd="$sandbox/prd.json"
+minimal_prd "$prd"
+record="$sandbox/claude-argv.txt"
+
+write_stub "$sandbox" claude "printf '%s\n' \"\$@\" > \"$record\"; echo DONE; exit 0"
+
+_isolated=$(make_isolated_path "$sandbox" claude)
+PATH="$_isolated" "$RALPH_LOOP" "$prd" --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+
+if [ -f "$record" ] && ! grep -q -- "--mcp-config" "$record"; then
+    pass "claude was invoked WITHOUT --mcp-config when --mcp is off"
+else
+    fail "claude unexpectedly received --mcp-config when --mcp was not set"
+fi
+rm -rf "$sandbox"
+
 # ---------------------------------------------------------------
 echo ""
 echo "─────────────────────────────────────────────"
