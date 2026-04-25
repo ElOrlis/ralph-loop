@@ -1811,6 +1811,14 @@ Details: $details
 EOF
 }
 
+log_iteration_mcp() {
+    local mcp_status="$1"
+
+    cat >> "$PROGRESS_FILE" << EOF
+MCP: $mcp_status
+EOF
+}
+
 # Log learnings to progress file
 log_learnings() {
     local learnings="$1"
@@ -2568,6 +2576,26 @@ Try again later or check Claude API status at https://status.anthropic.com"
         local api_duration=$((api_end_time - api_start_time))
 
         rm -f "$prompt_file"
+
+        # Classify per-iteration MCP status. Heuristic: case-insensitive
+        # substring match on 'mcpls' or whole-word 'mcp' in claude_output.
+        # 'off' means MCP is disabled for this run.
+        local mcp_status
+        if [ "$MCP_ENABLED" = false ]; then
+            mcp_status="off"
+        elif echo "$claude_output" | grep -Eiq 'mcpls|(^|[^a-z])mcp([^a-z]|$)'; then
+            mcp_status="degraded"
+            echo -e "${YELLOW}[WARN] MCP-related signal in Claude output this iteration; continuing.${NC}"
+            # Sidecar log for debuggability
+            local prd_dir
+            prd_dir="$(dirname "$JSON_FILE")"
+            echo "$claude_output" | grep -Ei 'mcpls|(^|[^a-z])mcp([^a-z]|$)' \
+                > "${prd_dir}/mcp-iteration-${iteration}.log" 2>/dev/null || true
+        else
+            mcp_status="ok"
+        fi
+
+        log_iteration_mcp "$mcp_status"
 
         # Validate JSON wasn't corrupted by Claude
         local json_valid

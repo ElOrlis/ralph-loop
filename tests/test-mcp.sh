@@ -173,6 +173,65 @@ fi
 rm -rf "$sandbox"
 
 # ---------------------------------------------------------------
+info "Test: progress.txt records MCP: ok|degraded|off per iteration"
+
+# Case A: --mcp on, claude exits cleanly → MCP: ok
+sandbox=$(make_sandbox)
+prd="$sandbox/prd.json"
+minimal_prd "$prd"
+write_stub "$sandbox" mcpls 'exit 0'
+write_stub "$sandbox" claude 'echo DONE; exit 0'
+
+isolated=$(make_isolated_path "$sandbox" mcpls claude)
+PATH="$isolated" "$RALPH_LOOP" "$prd" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+
+if grep -q "MCP: ok" "$sandbox/progress.txt" 2>/dev/null; then
+    pass "progress.txt shows 'MCP: ok' on healthy --mcp run"
+else
+    fail "progress.txt missing 'MCP: ok'. Contents: $(cat "$sandbox/progress.txt" 2>/dev/null || echo MISSING)"
+fi
+rm -rf "$sandbox"
+
+# Case B: --mcp on, claude stderr mentions mcpls error → MCP: degraded
+sandbox=$(make_sandbox)
+prd="$sandbox/prd.json"
+minimal_prd "$prd"
+write_stub "$sandbox" mcpls 'exit 0'
+write_stub "$sandbox" claude 'echo "mcpls server crashed" >&2; echo DONE; exit 0'
+
+isolated=$(make_isolated_path "$sandbox" mcpls claude)
+PATH="$isolated" "$RALPH_LOOP" "$prd" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+
+if grep -q "MCP: degraded" "$sandbox/progress.txt" 2>/dev/null; then
+    pass "progress.txt shows 'MCP: degraded' when claude stderr mentions mcpls"
+else
+    fail "progress.txt missing 'MCP: degraded'. Contents: $(cat "$sandbox/progress.txt" 2>/dev/null || echo MISSING)"
+fi
+# Verify sidecar log was written
+if [ -s "$sandbox/mcp-iteration-1.log" ]; then
+    pass "mcp-iteration-1.log written for degraded iteration"
+else
+    fail "mcp-iteration-1.log missing or empty"
+fi
+rm -rf "$sandbox"
+
+# Case C: --mcp off → MCP: off
+sandbox=$(make_sandbox)
+prd="$sandbox/prd.json"
+minimal_prd "$prd"
+write_stub "$sandbox" claude 'echo DONE; exit 0'
+
+isolated=$(make_isolated_path "$sandbox" mcpls claude)
+PATH="$isolated" "$RALPH_LOOP" "$prd" --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+
+if grep -q "MCP: off" "$sandbox/progress.txt" 2>/dev/null; then
+    pass "progress.txt shows 'MCP: off' when --mcp is not set"
+else
+    fail "progress.txt missing 'MCP: off'. Contents: $(cat "$sandbox/progress.txt" 2>/dev/null || echo MISSING)"
+fi
+rm -rf "$sandbox"
+
+# ---------------------------------------------------------------
 echo ""
 echo "─────────────────────────────────────────────"
 echo "Results: $TESTS_PASSED passed, $TESTS_FAILED failed"
