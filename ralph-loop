@@ -2295,6 +2295,14 @@ run_ralph_loop() {
         error_exit "Claude CLI is not available. Please install the Claude CLI to run Ralph Loop." "Visit https://docs.anthropic.com/claude/docs/claude-cli for installation instructions."
     fi
 
+    # Preflight: --mcp requires mcpls on PATH
+    if [ "$MCP_ENABLED" = true ]; then
+        if ! command -v mcpls &> /dev/null; then
+            error_exit "mcpls binary not found on PATH but --mcp was passed." \
+                "Install mcpls (https://github.com/bug-ops/mcpls) or rerun without --mcp."
+        fi
+    fi
+
     local start_time=$(date +%s)
     capture_original_branch
     git_branching_preflight

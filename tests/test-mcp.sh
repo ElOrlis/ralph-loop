@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+# Test suite for --mcp flag, preflight, config generation, and status surfacing
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+RALPH_LOOP="$PROJECT_ROOT/ralph-loop"
+
+pass() { echo -e "${GREEN}✓ PASS:${NC} $1"; TESTS_PASSED=$((TESTS_PASSED + 1)); }
+fail() { echo -e "${RED}✗ FAIL:${NC} $1"; TESTS_FAILED=$((TESTS_FAILED + 1)); }
+info() { echo -e "${YELLOW}→${NC} $1"; }
+
+SANDBOXES=()
+
+cleanup_all() {
+    local d
+    for d in "${SANDBOXES[@]}"; do
+        [ -d "$d" ] && rm -rf "$d"
+    done
+}
+trap cleanup_all EXIT
+
+# Each test runs in an isolated temp dir with a sandboxed PATH so we can
+# control whether 'mcpls' and 'claude' are present. We always keep core
+# tools (jq, node, git, gh) by prepending the stub dir to the real PATH.
+make_sandbox() {
+    local sandbox
+    sandbox=$(mktemp -d)
+    mkdir -p "$sandbox/bin"
+    SANDBOXES+=("$sandbox")
+    echo "$sandbox"
+}
+
+write_stub() {
+    # write_stub <sandbox> <name> <body>
+    local path="$1/bin/$2"
+    cat > "$path" <<EOF
+#!/usr/bin/env bash
+$3
+EOF
+    chmod +x "$path"
+}
+
+minimal_prd() {
+    # Emits a minimal PRD JSON file with one always-passing manual criterion
+    cat > "$1" <<'EOF'
+{
+  "title": "MCP Test PRD",
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Demo",
+      "category": "demo",
+      "priority": 1,
+      "acceptanceCriteria": [{"text": "Manual check", "type": "manual"}],
+      "passes": false
+    }
+  ]
+}
+EOF
+}
+
+# ---------------------------------------------------------------
+info "Test: --mcp without mcpls on PATH aborts with clear error"
+
+sandbox=$(make_sandbox)
+prd="$sandbox/prd.json"
+minimal_prd "$prd"
+
+# Build a PATH that keeps core tools but excludes any directory that
+# contains mcpls, ensuring the preflight truly cannot find it.
+_filtered_path="$sandbox/bin"
+IFS=: read -ra _path_parts <<< "$PATH"
+for _dir in "${_path_parts[@]}"; do
+    [ -x "$_dir/mcpls" ] && continue
+    _filtered_path="$_filtered_path:$_dir"
+done
+
+output=$(PATH="$_filtered_path" "$RALPH_LOOP" "$prd" --mcp --max-iterations 1 --no-github 2>&1 || true)
+
+if echo "$output" | grep -qi "mcpls.*not.*found\|mcpls.*PATH\|install.*mcpls"; then
+    pass "preflight aborts with mcpls-not-found message"
+else
+    fail "preflight did not produce expected mcpls-missing error. Got: $output"
+fi
+rm -rf "$sandbox"
+
+# ---------------------------------------------------------------
+echo ""
+echo "─────────────────────────────────────────────"
+echo "Results: $TESTS_PASSED passed, $TESTS_FAILED failed"
+echo "─────────────────────────────────────────────"
+[ $TESTS_FAILED -eq 0 ]
