@@ -102,6 +102,17 @@ OPTIONS:
     commit and flips to ready-for-review when all criteria pass. Use
     --no-branch to disable; --no-github also implies --no-branch.
 
+  Dependency Graph (Phase 6):
+    Tasks may declare dependencies with "**Depends On**: task-1, task-2" in
+    markdown (or a dependsOn array in JSON). Ralph's task picker replaces the
+    priority-only order with a topological sort: a task is only picked when
+    every task in its dependsOn list has passes=true. Blocked tasks show up
+    in progress output, get a "blocked" GitHub issue label, and a "Blocked"
+    Ralph Status on the project board. If branching is enabled, completed
+    dependency branches are merged into the task branch before Claude's turn;
+    on merge conflict Ralph records the conflict, marks the task blocked, and
+    moves on. Cycles are caught by --analyze-prd and by validate_prd_json.
+
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                             EXAMPLES                                       ║
 ╚════════════════════════════════════════════════════════════════════════════╝
@@ -359,6 +370,7 @@ convert_prd_to_json() {
     local current_task_priority=""
     local current_task_description=""
     local current_criteria=()
+    local current_task_depends_on=""
 
     # Start building JSON
     local json_content='{'
@@ -385,6 +397,27 @@ convert_prd_to_json() {
                 json_content+='"category": "'"${current_task_category:-Uncategorized}"'",'
                 json_content+='"priority": '${current_task_priority:-999}','
                 json_content+='"description": "'"${current_task_description//\"/\\\"}"'",'
+                # Phase 6: emit dependsOn if the Depends On line had any content
+                if [ -n "$current_task_depends_on" ]; then
+                    # split on commas, trim whitespace from each, drop empties
+                    local deps_json="["
+                    local deps_first=true
+                    local IFS=','
+                    for dep in $current_task_depends_on; do
+                        # trim leading/trailing whitespace
+                        dep="${dep#"${dep%%[![:space:]]*}"}"
+                        dep="${dep%"${dep##*[![:space:]]}"}"
+                        if [ -z "$dep" ]; then continue; fi
+                        if [ "$deps_first" = false ]; then deps_json+=","; fi
+                        deps_first=false
+                        deps_json+="\"${dep//\"/\\\"}\""
+                    done
+                    deps_json+="]"
+                    if [ "$deps_first" = false ]; then
+                        json_content+='"dependsOn": '"$deps_json"','
+                    fi
+                    unset IFS
+                fi
                 json_content+='"acceptanceCriteria": ['
 
                 local first_criteria=true
@@ -410,6 +443,7 @@ convert_prd_to_json() {
             current_task_priority=""
             current_task_description=""
             current_criteria=()
+            current_task_depends_on=""
 
         # Check for Category
         elif [[ "$line" =~ ^\*\*Category\*\*:[[:space:]]*(.+)$ ]]; then
@@ -418,6 +452,10 @@ convert_prd_to_json() {
         # Check for Priority
         elif [[ "$line" =~ ^\*\*Priority\*\*:[[:space:]]*([0-9]+)$ ]]; then
             current_task_priority="${BASH_REMATCH[1]}"
+
+        # Check for Depends On
+        elif [[ "$line" =~ ^\*\*Depends[[:space:]]+On\*\*:[[:space:]]*(.*)$ ]]; then
+            current_task_depends_on="${BASH_REMATCH[1]}"
 
         # Check for Acceptance Criteria header
         elif [[ "$line" =~ ^###[[:space:]]+Acceptance[[:space:]]+Criteria ]]; then
@@ -452,6 +490,27 @@ convert_prd_to_json() {
         json_content+='"category": "'"${current_task_category:-Uncategorized}"'",'
         json_content+='"priority": '${current_task_priority:-999}','
         json_content+='"description": "'"${current_task_description//\"/\\\"}"'",'
+        # Phase 6: emit dependsOn if the Depends On line had any content
+        if [ -n "$current_task_depends_on" ]; then
+            # split on commas, trim whitespace from each, drop empties
+            local deps_json="["
+            local deps_first=true
+            local IFS=','
+            for dep in $current_task_depends_on; do
+                # trim leading/trailing whitespace
+                dep="${dep#"${dep%%[![:space:]]*}"}"
+                dep="${dep%"${dep##*[![:space:]]}"}"
+                if [ -z "$dep" ]; then continue; fi
+                if [ "$deps_first" = false ]; then deps_json+=","; fi
+                deps_first=false
+                deps_json+="\"${dep//\"/\\\"}\""
+            done
+            deps_json+="]"
+            if [ "$deps_first" = false ]; then
+                json_content+='"dependsOn": '"$deps_json"','
+            fi
+            unset IFS
+        fi
         json_content+='"acceptanceCriteria": ['
 
         local first_criteria=true
@@ -654,6 +713,45 @@ Run './ralph-loop --analyze-prd $PRD_FILE' for detailed feedback."
     prurl_bad=$(jq -r '.tasks[] | select(.prUrl != null) | select((.prUrl | type) != "string") | .id' "$json_file")
     if [ -n "$prurl_bad" ]; then
         echo -e "${RED}[ERROR] Tasks with non-string prUrl: $prurl_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.dependsOn (if present) must be an array of strings
+    local deps_bad
+    deps_bad=$(jq -r '.tasks[] | select(.dependsOn != null) | select((.dependsOn | type) != "array") | .id' "$json_file")
+    if [ -n "$deps_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with non-array dependsOn: $deps_bad${NC}"
+        return 1
+    fi
+    local deps_elem_bad
+    deps_elem_bad=$(jq -r '.tasks[] | select(.dependsOn != null) | select([.dependsOn[] | type] | any(. != "string")) | .id' "$json_file")
+    if [ -n "$deps_elem_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with non-string entries in dependsOn: $deps_elem_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.status (if present) must be "ready" or "blocked"
+    local status_bad
+    status_bad=$(jq -r '.tasks[] | select(.status != null) | select(.status != "ready" and .status != "blocked") | .id' "$json_file")
+    if [ -n "$status_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with invalid status (must be \"ready\" or \"blocked\"): $status_bad${NC}"
+        return 1
+    fi
+
+    # Optional: each task.blockedBy (if present) must be an array of strings
+    local bb_bad
+    bb_bad=$(jq -r '.tasks[] | select(.blockedBy != null) | select((.blockedBy | type) != "array" or ([.blockedBy[] | type] | any(. != "string"))) | .id' "$json_file")
+    if [ -n "$bb_bad" ]; then
+        echo -e "${RED}[ERROR] Tasks with invalid blockedBy: $bb_bad${NC}"
+        return 1
+    fi
+
+    # Phase 6: graph-level validation (unknown refs, self-deps, cycles)
+    local deps_reply
+    local deps_exit=0
+    deps_reply=$(node "$SCRIPT_DIR/lib/deps/index.js" validate --task-file "$json_file" 2>&1) || deps_exit=$?
+    if [ $deps_exit -ne 0 ]; then
+        echo -e "${RED}[ERROR] Dependency graph validation failed: $deps_reply${NC}"
         return 1
     fi
 
@@ -1024,6 +1122,122 @@ restore_working_tree() {
     fi
 }
 
+# Phase 6: merge each completed dependency's branch into the current task branch.
+# Args: $1=task_id $2=task_index
+# Returns:
+#   0 on success (all deps merged or nothing to merge)
+#   1 on merge conflict — caller should mark the task blocked and skip the iteration.
+# On conflict: aborts the merge, writes status=blocked + blockedReason to the task,
+# posts a comment on the GitHub issue, and sets CURRENT_TASK_MERGE_CONFLICT=true.
+CURRENT_TASK_MERGE_CONFLICT=""
+merge_dependency_branches() {
+    local task_id="$1"
+    local task_index="$2"
+    CURRENT_TASK_MERGE_CONFLICT=""
+
+    if [ "$BRANCH_ENABLED" = false ]; then return 0; fi
+    if [ -z "$CURRENT_TASK_BRANCH" ]; then return 0; fi
+
+    local deps_json
+    deps_json=$(jq -c ".tasks[$task_index].dependsOn // []" "$JSON_FILE")
+    local dep_count
+    dep_count=$(echo "$deps_json" | jq 'length')
+    if [ "$dep_count" -eq 0 ]; then return 0; fi
+
+    local dep_idx=0
+    while [ $dep_idx -lt "$dep_count" ]; do
+        local dep_id
+        dep_id=$(echo "$deps_json" | jq -r ".[$dep_idx]")
+        local dep_task_index
+        dep_task_index=$(jq --arg id "$dep_id" '.tasks | map(.id) | index($id) // -1' "$JSON_FILE")
+        if [ "$dep_task_index" = "-1" ]; then
+            dep_idx=$((dep_idx + 1))
+            continue
+        fi
+
+        local dep_passes dep_branch
+        dep_passes=$(jq -r ".tasks[$dep_task_index].passes" "$JSON_FILE")
+        dep_branch=$(jq -r ".tasks[$dep_task_index].branchName // empty" "$JSON_FILE")
+
+        # Skip deps that never got their own branch (e.g. --no-branch earlier runs).
+        if [ -z "$dep_branch" ] || [ "$dep_passes" != "true" ]; then
+            dep_idx=$((dep_idx + 1))
+            continue
+        fi
+
+        local reply
+        local reply_exit=0
+        reply=$(node "$SCRIPT_DIR/lib/git/index.js" merge-branch --branch "$dep_branch" 2>&1) || reply_exit=$?
+        if [ $reply_exit -ne 0 ]; then
+            echo -e "${YELLOW}[WARN] merge-branch call failed for $dep_branch: $reply${NC}"
+            dep_idx=$((dep_idx + 1))
+            continue
+        fi
+
+        local ok conflict
+        ok=$(echo "$reply" | jq -r '.ok')
+        conflict=$(echo "$reply" | jq -r '.conflict // false')
+
+        if [ "$ok" = "true" ]; then
+            local sha
+            sha=$(echo "$reply" | jq -r '.sha')
+            emit_logging_event dependency_merged \
+                "{\"taskId\":\"$task_id\",\"depTaskId\":\"$dep_id\",\"depBranch\":\"$dep_branch\",\"sha\":\"$sha\"}"
+            if [ "$VERBOSE" = true ]; then
+                echo -e "${GREEN}[INFO] Merged $dep_branch into $CURRENT_TASK_BRANCH (sha ${sha:0:7})${NC}"
+            fi
+            dep_idx=$((dep_idx + 1))
+            continue
+        fi
+
+        if [ "$conflict" = "true" ]; then
+            local files_csv
+            files_csv=$(echo "$reply" | jq -r '.files | join(", ")')
+            local files_json
+            files_json=$(echo "$reply" | jq -c '.files')
+
+            echo -e "${YELLOW}[WARN] Merge conflict on $task_id: $dep_branch conflicts in $files_csv${NC}"
+
+            # Persist status=blocked + blockedReason on the current task.
+            local reason="merge conflict with $dep_id on $files_csv"
+            local updated
+            updated=$(jq \
+                --argjson idx "$task_index" \
+                --arg reason "$reason" \
+                --argjson by "[\"$dep_id\"]" \
+                '.tasks[$idx].status = "blocked" |
+                 .tasks[$idx].blockedBy = $by |
+                 .tasks[$idx].blockedReason = $reason' \
+                "$JSON_FILE")
+            echo "$updated" | jq '.' > "$JSON_FILE"
+
+            emit_logging_event merge_conflict \
+                "{\"taskId\":\"$task_id\",\"depTaskId\":\"$dep_id\",\"depBranch\":\"$dep_branch\",\"files\":$files_json}"
+            emit_logging_event task_blocked \
+                "{\"taskId\":\"$task_id\",\"blockedBy\":[\"$dep_id\"],\"reason\":\"$reason\"}"
+
+            # Comment on the issue (if present + GitHub enabled).
+            local issue_number
+            issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+            if [ "$GITHUB_ENABLED" = true ] && [ -n "$TARGET_REPO" ] && [ -n "$issue_number" ]; then
+                local body
+                body=$(printf '**Task blocked by merge conflict.**\n\nFailed to merge `%s` (from task \`%s\`).\n\nConflicting files: `%s`\n\nRalph has skipped this iteration. Resolve the conflict manually, then re-run.' \
+                    "$dep_branch" "$dep_id" "$files_csv")
+                gh issue comment "$issue_number" --repo "$TARGET_REPO" --body "$body" >/dev/null 2>&1 || true
+                node "$SCRIPT_DIR/lib/github/index.js" add-label \
+                    --repo "$TARGET_REPO" --issue "$issue_number" --label "blocked" >/dev/null 2>&1 || true
+            fi
+
+            CURRENT_TASK_MERGE_CONFLICT=true
+            return 1
+        fi
+
+        dep_idx=$((dep_idx + 1))
+    done
+
+    return 0
+}
+
 # Commit the current working tree for this iteration with Ralph trailers.
 # Args: $1=task_id $2=task_index $3=iteration $4=verify_result_json $5=ralph_status
 # ralph_status must be one of: in-progress | passed | failed
@@ -1300,6 +1514,30 @@ analyze_prd() {
         echo -e "  ${YELLOW}⚠ Low executable coverage. Add type hints to criteria for automated verification.${NC}"
     fi
     echo ""
+
+    # Phase 6: dependency graph report
+    local deps_reply
+    local deps_exit=0
+    deps_reply=$(node "$SCRIPT_DIR/lib/deps/index.js" next-task --task-file "$json_file" 2>&1) || deps_exit=$?
+    if [ $deps_exit -eq 0 ] && [ -n "$deps_reply" ]; then
+        local cycle
+        cycle=$(echo "$deps_reply" | jq -r '.cycle // empty')
+        local ready_count blocked_count
+        ready_count=$(echo "$deps_reply" | jq '.ready | length')
+        blocked_count=$(echo "$deps_reply" | jq '.blocked | length')
+
+        echo -e "${BLUE}Dependency Analysis:${NC}"
+        echo "  Ready (unblocked): $ready_count"
+        echo "  Blocked (waiting on deps): $blocked_count"
+        if [ "$blocked_count" -gt 0 ]; then
+            echo "  Blocked tasks:"
+            echo "$deps_reply" | jq -r '.blocked[] | "    - \(.id) blocked by: \(.blockedBy | join(", "))"'
+        fi
+        if [ -n "$cycle" ]; then
+            echo -e "  ${RED}⚠ Dependency cycle detected: $(echo "$deps_reply" | jq -r '.cycle | join(" -> ")')${NC}"
+        fi
+        echo ""
+    fi
 
     # Create analysis prompt for Claude
     local analysis_prompt="You are a PRD quality analyzer. Analyze the following Product Requirements Document (PRD) and provide detailed feedback on its quality.
@@ -1685,26 +1923,24 @@ show_progress() {
 
 # Find highest-priority incomplete task
 find_next_task() {
-    local prd_content=$(cat "$JSON_FILE")
-    local task_count=$(echo "$prd_content" | jq '.tasks | length')
-    local task_index=0
-    local highest_priority_task=""
-    local highest_priority=999999
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/deps/index.js" next-task --task-file "$JSON_FILE" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        echo -e "${RED}[ERROR] Dependency graph evaluation failed: $reply${NC}" >&2
+        echo ""
+        return
+    fi
 
-    while [ $task_index -lt $task_count ]; do
-        local task=$(echo "$prd_content" | jq ".tasks[$task_index]")
-        local task_passes=$(echo "$task" | jq -r '.passes')
-        local task_priority=$(echo "$task" | jq -r '.priority')
+    local cycle
+    cycle=$(echo "$reply" | jq -r '.cycle // empty')
+    if [ -n "$cycle" ]; then
+        echo -e "${RED}[ERROR] Dependency cycle detected among tasks: $(echo "$reply" | jq -r '.cycle | join(" -> ")')${NC}" >&2
+        echo ""
+        return
+    fi
 
-        if [ "$task_passes" = "false" ] && [ "$task_priority" -lt "$highest_priority" ]; then
-            highest_priority=$task_priority
-            highest_priority_task=$(echo "$task" | jq -r '.id')
-        fi
-
-        task_index=$((task_index + 1))
-    done
-
-    echo "$highest_priority_task"
+    echo "$reply" | jq -r '.nextTask // empty'
 }
 
 # Get task details by ID
@@ -1866,6 +2102,53 @@ ensure_project_item() {
     fi
 }
 
+# Phase 6: persist status="ready"|"blocked" and blockedBy into PRD JSON
+# for every task, based on the latest dep-graph reply.
+sync_blocked_statuses() {
+    local reply
+    local reply_exit=0
+    reply=$(node "$SCRIPT_DIR/lib/deps/index.js" next-task --task-file "$JSON_FILE" 2>&1) || reply_exit=$?
+    if [ $reply_exit -ne 0 ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${YELLOW}[WARN] sync_blocked_statuses: dep-graph call failed: $reply${NC}"
+        fi
+        return 0
+    fi
+
+    local cycle
+    cycle=$(echo "$reply" | jq -r '.cycle // empty')
+    if [ -n "$cycle" ]; then
+        # Don't mutate statuses when the graph is broken — validation surfaces this elsewhere.
+        return 0
+    fi
+
+    # Build {taskId: blockedBy[]} map from reply.blocked, then update every task.
+    local blocked_map
+    blocked_map=$(echo "$reply" | jq '[.blocked[] | {(.id): .blockedBy}] | add // {}')
+    local ready_ids
+    ready_ids=$(echo "$reply" | jq -c '.ready')
+
+    local updated
+    updated=$(jq \
+        --argjson blocked "$blocked_map" \
+        --argjson ready "$ready_ids" \
+        '
+        .tasks |= map(
+            .id as $id |
+            if .passes == true then
+                . + { status: "ready", blockedBy: [] }
+            elif ($blocked[$id]) then
+                . + { status: "blocked", blockedBy: $blocked[$id] }
+            elif (($ready | index($id)) != null) then
+                . + { status: "ready", blockedBy: [] }
+            else
+                . + { status: "ready", blockedBy: [] }
+            end
+        )
+        ' "$JSON_FILE")
+    echo "$updated" | jq '.' > "$JSON_FILE"
+}
+
 # Post iteration results as a comment on the task's GitHub issue
 post_iteration_comment() {
     local task_id="$1"
@@ -2006,6 +2289,8 @@ run_ralph_loop() {
     local start_time=$(date +%s)
     capture_original_branch
     git_branching_preflight
+    # Phase 6: initial status sync (so --dry-run + --analyze-prd see current blocked set)
+    sync_blocked_statuses
     local iteration=1
 
     # If resuming, start from last iteration + 1
@@ -2037,6 +2322,9 @@ run_ralph_loop() {
         if [ "$VERBOSE" = true ]; then
             echo -e "${BLUE}[INFO] Starting iteration $iteration/$MAX_ITERATIONS${NC}"
         fi
+
+        # Phase 6: refresh status / blockedBy on every task before picking one.
+        sync_blocked_statuses
 
         # Find next task to work on
         local next_task_id=$(find_next_task)
@@ -2099,6 +2387,14 @@ run_ralph_loop() {
         # Phase 5: snapshot working tree + switch to task branch
         snapshot_working_tree
         ensure_task_branch "$next_task_id" "$task_index"
+        # Phase 6: merge completed dependency branches. On conflict: log, comment, skip iteration.
+        if ! merge_dependency_branches "$next_task_id" "$task_index"; then
+            log_iteration_result "$iteration" "$next_task_id" "BLOCKED" "Merge conflict — see issue comment"
+            restore_working_tree
+            rm -f "${JSON_FILE}.pre-iteration"
+            iteration=$((iteration + 1))
+            continue
+        fi
 
         # Log iteration start
         log_iteration "$iteration" "$next_task_id" "$task_title"
@@ -2582,6 +2878,9 @@ main() {
     validate_prd_json "$JSON_FILE"
     echo -e "${GREEN}✓${NC} PRD validation passed"
 
+    # Phase 6: persist blocked/ready statuses so --analyze-prd reports them
+    sync_blocked_statuses
+
     # Resolve GitHub repository
     resolve_target_repo
     ensure_github_project
@@ -2599,5 +2898,7 @@ main() {
     run_ralph_loop
 }
 
-# Run main
-main "$@"
+# Run main when executed directly; allow sourcing for unit tests.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

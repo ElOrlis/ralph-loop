@@ -12,6 +12,10 @@ NC='\033[0m'
 TESTS_PASSED=0
 TESTS_FAILED=0
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+RALPH_LOOP="$PROJECT_ROOT/ralph-loop"
+
 # Helper functions
 pass() {
     echo -e "${GREEN}✓ PASS:${NC} $1"
@@ -436,6 +440,145 @@ EOF
     fi
 }
 
+# Test 13: Accepts optional dependsOn, status, blockedBy arrays
+test_accepts_depends_on_array() {
+    echo ""
+    echo "Test 13: accepts optional dependsOn array"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "Deps",
+  "tasks": [
+    { "id": "task-1", "title": "A", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": true, "attempts": 1 },
+    { "id": "task-2", "title": "B", "category": "C", "priority": 2,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+      "dependsOn": ["task-1"], "status": "ready", "blockedBy": [] }
+  ]
+}
+EOF
+
+    local output exit_code
+    output=$(../ralph-loop "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then pass "accepts dependsOn + status + blockedBy"
+    else fail "rejected valid PRD with Phase 6 fields. Output: $output"; fi
+}
+
+# Test 14: Rejects non-array dependsOn
+test_rejects_non_array_depends_on() {
+    echo ""
+    echo "Test 14: rejects non-array dependsOn"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "Bad",
+  "tasks": [{ "id": "task-1", "title": "A", "category": "C", "priority": 1,
+    "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+    "dependsOn": "task-0" }]
+}
+EOF
+
+    local output exit_code
+    output=$(../ralph-loop "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "dependsOn"; then
+        pass "rejects non-array dependsOn"
+    else
+        fail "should reject non-array dependsOn. Exit: $exit_code, Output: $output"
+    fi
+}
+
+# Test 15: Rejects bad status value
+test_rejects_bad_status_value() {
+    echo ""
+    echo "Test 15: rejects status value outside {ready, blocked}"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "Bad",
+  "tasks": [{ "id": "task-1", "title": "A", "category": "C", "priority": 1,
+    "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+    "status": "wizard" }]
+}
+EOF
+
+    local output exit_code
+    output=$(../ralph-loop "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "status"; then
+        pass "rejects bad status value"
+    else
+        fail "should reject 'wizard' status. Exit: $exit_code, Output: $output"
+    fi
+}
+
+test_rejects_unknown_dependency_ref() {
+    echo ""
+    echo "Test: validate_prd_json rejects dependsOn referencing non-existent task"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "Bad",
+  "tasks": [{ "id": "task-1", "title": "A", "category": "C", "priority": 1,
+    "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+    "dependsOn": ["ghost"] }]
+}
+EOF
+
+    local output exit_code
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "unknown dependency"; then
+        pass "rejects unknown dependency reference"
+    else
+        fail "should reject ghost dependency. Exit: $exit_code, Output: $output"
+    fi
+}
+
+test_rejects_cycle() {
+    echo ""
+    echo "Test: validate_prd_json rejects dependency cycles"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "Bad",
+  "tasks": [
+    { "id": "task-1", "title": "A", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0, "dependsOn": ["task-2"] },
+    { "id": "task-2", "title": "B", "category": "C", "priority": 2,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0, "dependsOn": ["task-1"] }
+  ]
+}
+EOF
+
+    local output exit_code
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "cycle"; then
+        pass "rejects dependency cycle"
+    else
+        fail "should reject cycle. Exit: $exit_code, Output: $output"
+    fi
+}
+
+test_rejects_self_dependency() {
+    echo ""
+    echo "Test: validate_prd_json rejects self-dependency"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "Bad",
+  "tasks": [{ "id": "task-1", "title": "A", "category": "C", "priority": 1,
+    "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+    "dependsOn": ["task-1"] }]
+}
+EOF
+
+    local output exit_code
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "self"; then
+        pass "rejects self-dependency"
+    else
+        fail "should reject self-dependency. Exit: $exit_code, Output: $output"
+    fi
+}
+
 # Main test execution
 main() {
     echo "========================================"
@@ -456,6 +599,12 @@ main() {
     test_projectitem_id_must_be_string
     test_accepts_ralph_git_meta
     test_rejects_bad_branch_name_type
+    test_accepts_depends_on_array
+    test_rejects_non_array_depends_on
+    test_rejects_bad_status_value
+    test_rejects_unknown_dependency_ref
+    test_rejects_cycle
+    test_rejects_self_dependency
 
     cleanup
 

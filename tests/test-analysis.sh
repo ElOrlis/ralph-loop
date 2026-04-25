@@ -7,10 +7,15 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 TESTS_PASSED=0
 TESTS_FAILED=0
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+RALPH_LOOP="$PROJECT_ROOT/ralph-loop"
 
 # Helper functions
 pass() {
@@ -63,7 +68,7 @@ test_analyze_flag() {
 }
 EOF
 
-    ../ralph-loop "$TEST_DIR/analyze-test.json" --analyze-prd > "$TEST_DIR/analyze-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/analyze-test.json" --analyze-prd > "$TEST_DIR/analyze-output.txt" 2>&1 || true
 
     if grep -qi "analy" "$TEST_DIR/analyze-output.txt"; then
         pass "--analyze-prd flag triggers analysis"
@@ -84,7 +89,7 @@ test_validation_first() {
 }
 EOF
 
-    ../ralph-loop "$TEST_DIR/invalid-for-analysis.json" --analyze-prd > "$TEST_DIR/validation-first.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/invalid-for-analysis.json" --analyze-prd > "$TEST_DIR/validation-first.txt" 2>&1 || true
 
     if grep -qi "validation\|error\|invalid" "$TEST_DIR/validation-first.txt"; then
         pass "Validation runs before analysis"
@@ -124,7 +129,7 @@ test_statistics() {
 }
 EOF
 
-    ../ralph-loop "$TEST_DIR/stats-test.json" --analyze-prd > "$TEST_DIR/stats-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/stats-test.json" --analyze-prd > "$TEST_DIR/stats-output.txt" 2>&1 || true
 
     local has_stats=0
 
@@ -181,7 +186,7 @@ test_task_feedback() {
 }
 EOF
 
-    ../ralph-loop "$TEST_DIR/feedback-test.json" --analyze-prd > "$TEST_DIR/feedback-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/feedback-test.json" --analyze-prd > "$TEST_DIR/feedback-output.txt" 2>&1 || true
 
     if grep -qi "task-1\|task-2\|first task\|second task" "$TEST_DIR/feedback-output.txt"; then
         pass "Analysis provides per-task feedback"
@@ -212,7 +217,7 @@ test_exits_after_analysis() {
 }
 EOF
 
-    ../ralph-loop "$TEST_DIR/exit-test.json" --analyze-prd > "$TEST_DIR/exit-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/exit-test.json" --analyze-prd > "$TEST_DIR/exit-output.txt" 2>&1 || true
 
     # Should not contain iteration-related output
     if ! grep -qi "iteration.*1\|starting.*loop\|calling.*claude" "$TEST_DIR/exit-output.txt"; then
@@ -255,7 +260,7 @@ test_improvement_suggestions() {
 }
 EOF
 
-    ../ralph-loop "$TEST_DIR/vague-test.json" --analyze-prd > "$TEST_DIR/vague-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/vague-test.json" --analyze-prd > "$TEST_DIR/vague-output.txt" 2>&1 || true
 
     if grep -qi "vague\|specific\|improve\|suggest\|clarif\|more detail" "$TEST_DIR/vague-output.txt"; then
         pass "Analysis suggests improvements for vague criteria"
@@ -286,7 +291,7 @@ test_overall_recommendations() {
 }
 EOF
 
-    ../ralph-loop "$TEST_DIR/recommendations-test.json" --analyze-prd > "$TEST_DIR/recommendations-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/recommendations-test.json" --analyze-prd > "$TEST_DIR/recommendations-output.txt" 2>&1 || true
 
     if grep -qi "recommend\|overall\|summar\|conclusion" "$TEST_DIR/recommendations-output.txt"; then
         pass "Analysis includes overall recommendations"
@@ -323,7 +328,7 @@ test_well_written_prd() {
 }
 EOF
 
-    ../ralph-loop "$TEST_DIR/good-prd.json" --analyze-prd > "$TEST_DIR/good-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/good-prd.json" --analyze-prd > "$TEST_DIR/good-output.txt" 2>&1 || true
 
     if [ -s "$TEST_DIR/good-output.txt" ]; then
         pass "Analysis works with well-written PRD"
@@ -349,7 +354,7 @@ Description here.
 - Second criterion
 EOF
 
-    ../ralph-loop "$TEST_DIR/markdown-test.md" --analyze-prd > "$TEST_DIR/markdown-analysis.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/markdown-test.md" --analyze-prd > "$TEST_DIR/markdown-analysis.txt" 2>&1 || true
 
     if grep -qi "analy" "$TEST_DIR/markdown-analysis.txt"; then
         pass "Analysis works with markdown files"
@@ -362,6 +367,65 @@ EOF
         pass "Markdown converted to JSON before analysis"
     else
         fail "Markdown not converted to JSON"
+    fi
+}
+
+# Test 10: Reports dependency statistics (ready / blocked counts)
+test_analyze_prd_reports_dependency_stats() {
+    echo ""
+    echo "Test 10: --analyze-prd prints ready / blocked counts"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "x",
+  "tasks": [
+    { "id": "task-1", "title": "A", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0 },
+    { "id": "task-2", "title": "B", "category": "C", "priority": 2,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0,
+      "dependsOn": ["task-1"] }
+  ]
+}
+EOF
+
+    local output
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --analyze-prd --no-github 2>&1 | head -80)
+    if echo "$output" | grep -qi "Dependency"; then
+        pass "prints Dependency section"
+    else
+        fail "expected Dependency section in output. Got:\n$output"
+    fi
+
+    if echo "$output" | grep -qi "Blocked.*1"; then
+        pass "reports 1 blocked task"
+    else
+        fail "expected 'Blocked' count in output. Got:\n$output"
+    fi
+}
+
+# Test 11: Surfaces cycle errors in analysis output
+test_analyze_prd_reports_cycle_warning() {
+    echo ""
+    echo "Test 11: --analyze-prd surfaces cycle errors"
+
+    cat > "$TEST_DIR/prd.json" << 'EOF'
+{
+  "title": "x",
+  "tasks": [
+    { "id": "task-1", "title": "A", "category": "C", "priority": 1,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0, "dependsOn": ["task-2"] },
+    { "id": "task-2", "title": "B", "category": "C", "priority": 2,
+      "acceptanceCriteria": ["x"], "passes": false, "attempts": 0, "dependsOn": ["task-1"] }
+  ]
+}
+EOF
+
+    local output exit_code
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --analyze-prd --no-github 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "cycle"; then
+        pass "surfaces cycle error and exits non-zero"
+    else
+        fail "expected non-zero exit + cycle message. Exit: $exit_code, Output:\n$output"
     fi
 }
 
@@ -382,6 +446,8 @@ main() {
     test_overall_recommendations
     test_well_written_prd
     test_markdown_analysis
+    test_analyze_prd_reports_dependency_stats
+    test_analyze_prd_reports_cycle_warning
 
     cleanup
 

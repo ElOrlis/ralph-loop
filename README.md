@@ -574,6 +574,30 @@ history is complete.
 
 Disable entirely with `--no-branch`. `--no-github` also implies `--no-branch`.
 
+## Phase 6 — Dependency Graph
+
+Tasks can declare dependencies via `**Depends On**:` in markdown or `dependsOn` in JSON:
+
+    ## Task: Add auth middleware
+    **Category**: Backend
+    **Priority**: 3
+    **Depends On**: task-1, task-2
+
+Ralph's task picker is a topological sort — a task is only picked when every
+task in its `dependsOn` list has `passes=true`. Blocked tasks get:
+
+- `status: "blocked"` + `blockedBy: [...]` in the PRD JSON
+- A `blocked` label on the GitHub issue
+- `Ralph Status = Blocked` on the project board
+
+If `--no-branch` is off, completed dependency branches are `git merge --no-edit`'d
+into the task branch before Claude's turn. On conflict, Ralph aborts the merge,
+records a `merge_conflict` event, marks the task blocked, posts an issue comment,
+and moves to the next non-blocked task.
+
+Cycles and dangling-`dependsOn` references are caught at validation time and by
+`--analyze-prd`.
+
 ## Contributing
 
 Contributions are welcome! Here's how to contribute:

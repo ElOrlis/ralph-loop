@@ -318,6 +318,65 @@ EOF
     fi
 }
 
+# Test 8: Parses Depends On line
+test_parses_depends_on_line() {
+    echo ""
+    echo "Test 8: Parse **Depends On**: line into dependsOn array"
+
+    cat > "$TEST_DIR/prd.md" << 'EOF'
+# Test PRD
+
+## Task: First
+**Category**: Backend
+**Priority**: 1
+
+Stub.
+
+### Acceptance Criteria
+- x
+
+## Task: Second
+**Category**: Backend
+**Priority**: 2
+**Depends On**: task-1
+
+Stub.
+
+### Acceptance Criteria
+- x
+
+## Task: Third
+**Category**: Backend
+**Priority**: 3
+**Depends On**: task-1 , task-2
+
+Stub.
+
+### Acceptance Criteria
+- x
+EOF
+
+    # --dry-run converts markdown, validates, builds a prompt, then exits — no Claude call.
+    ../ralph-loop "$TEST_DIR/prd.md" --dry-run --no-github >/dev/null 2>&1 || true
+
+    local json_file="$TEST_DIR/prd.json"
+    if [ ! -f "$json_file" ]; then fail "expected generated $json_file"; return; fi
+
+    local t1_deps t2_deps t3_deps
+    t1_deps=$(jq -r '.tasks[0].dependsOn // "absent"' "$json_file")
+    t2_deps=$(jq -c '.tasks[1].dependsOn' "$json_file")
+    t3_deps=$(jq -c '.tasks[2].dependsOn' "$json_file")
+
+    if [ "$t1_deps" = "absent" ]; then pass "task without **Depends On**: omits dependsOn"
+    else fail "expected task-1 to have no dependsOn, got: $t1_deps"; fi
+
+    if [ "$t2_deps" = '["task-1"]' ]; then pass "task-2 parses single dep"
+    else fail "expected [\"task-1\"], got: $t2_deps"; fi
+
+    if [ "$t3_deps" = '["task-1","task-2"]' ]; then pass "task-3 parses comma-separated deps with whitespace"
+    else fail "expected [\"task-1\",\"task-2\"], got: $t3_deps"; fi
+}
+
 # Main test execution
 main() {
     echo "========================================"
@@ -333,6 +392,8 @@ main() {
     test_preserve_markdown
     test_use_existing_json
     test_required_fields
+
+    test_parses_depends_on_line
 
     cleanup
 

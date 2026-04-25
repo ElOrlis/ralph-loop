@@ -27,6 +27,7 @@ Add server-side email validation using a robust validation library to ensure all
 
 **Category**: Frontend
 **Priority**: 2
+**Depends On**: task-1
 
 Implement client-side email validation with real-time feedback as the user types in the registration form.
 
