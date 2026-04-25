@@ -2172,6 +2172,7 @@ post_iteration_comment() {
     local task_index="$2"
     local current_iteration="$3"
     local verify_result="$4"
+    local mcp_status="${5:-}"
 
     if [ "$GITHUB_ENABLED" = false ]; then
         return 0
@@ -2179,7 +2180,7 @@ post_iteration_comment() {
 
     local issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
     if [ -z "$issue_number" ]; then
-        return 0  # No issue to update
+        return 0
     fi
 
     local criteria_json=$(jq -c ".tasks[$task_index].acceptanceCriteria" "$JSON_FILE")
@@ -2189,13 +2190,19 @@ post_iteration_comment() {
         echo -e "${BLUE}[INFO] Posting iteration comment to issue #$issue_number...${NC}"
     fi
 
+    local mcp_args=()
+    if [ -n "$mcp_status" ]; then
+        mcp_args+=(--mcp-status "$mcp_status")
+    fi
+
     node "$SCRIPT_DIR/lib/github/index.js" update-issue \
         --repo "$TARGET_REPO" \
         --issue "$issue_number" \
         --iteration "$current_iteration" \
         --max-iterations "$MAX_ITERATIONS" \
         --results "$results_json" \
-        --criteria "$criteria_json" 2>&1 || {
+        --criteria "$criteria_json" \
+        "${mcp_args[@]}" 2>&1 || {
         echo -e "${YELLOW}[WARN] Failed to post comment to issue #$issue_number${NC}"
     }
 }
@@ -2687,7 +2694,7 @@ Try again later or check Claude API status at https://status.anthropic.com"
             log_iteration_result "$iteration" "$next_task_id" "PASSED" "All criteria verified"
 
             # Post iteration comment to GitHub issue
-            post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result"
+            post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result" "$mcp_status"
             # Sync project fields
             sync_project_item "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
@@ -2753,7 +2760,7 @@ Try again later or check Claude API status at https://status.anthropic.com"
             done
 
             # Post iteration comment to GitHub issue
-            post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result"
+            post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result" "$mcp_status"
             # Sync project fields
             sync_project_item "$next_task_id" "$task_index" "$iteration" "$verify_result"
 
