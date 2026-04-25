@@ -16,6 +16,8 @@ RESUME=false
 ANALYZE_PRD=false
 DRY_RUN=false
 GITHUB_ENABLED=true
+MCP_ENABLED=false
+MCP_CONFIG_FILE=""
 REPO_OVERRIDE=""
 TARGET_REPO=""
 GITHUB_API_CALLS=0
@@ -85,6 +87,9 @@ OPTIONS:
   --no-github             Disable all GitHub integration
   --no-branch             Disable per-task git branching and PR creation
                           (automatically set by --no-github)
+  --mcp                   Enable mcpls MCP server for Claude (opt-in).
+                          Requires 'mcpls' on PATH. See:
+                          https://github.com/bug-ops/mcpls
   --repo owner/name      Override target GitHub repository
                           (default: PRD "repository" field or git remote origin)
 
@@ -287,6 +292,10 @@ parse_arguments() {
                 ;;
             --no-branch)
                 BRANCH_ENABLED=false
+                shift
+                ;;
+            --mcp)
+                MCP_ENABLED=true
                 shift
                 ;;
             --repo)
