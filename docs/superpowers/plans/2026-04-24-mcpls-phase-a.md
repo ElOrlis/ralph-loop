@@ -18,7 +18,7 @@
 |------|--------|----------------|
 | `lib/mcp/index.js` | **Create** | Thin CLI: `write-config --output <path>` writes the static MCP server config JSON. |
 | `lib/mcp/config.js` | **Create** | Pure function `buildMcpConfig()` returning the config object. Kept separate so it's unit-testable without spawning Node CLI. |
-| `lib/mcp/__tests__/config.test.js` | **Create** | Jest unit test for `buildMcpConfig`. |
+| `lib/mcp/config.test.js` | **Create** | Jest unit test for `buildMcpConfig` (flat layout next to source — project convention). |
 | `ralph-loop` | **Modify** | (1) `parse_arguments`: add `--mcp` flag. (2) `show_help`: document the flag. (3) Loop startup: preflight when `MCP_ENABLED`. (4) Generate `mcp-config.json` once per run. (5) Three Claude invocations append `--mcp-config "$MCP_CONFIG_FILE"` when enabled. (6) Classify each iteration's MCP status from `claude_output`. (7) `log_iteration` writes the `MCP:` indicator. (8) `post_iteration_comment` forwards the status. |
 | `lib/github/index.js` | **Modify** | `update-issue` command accepts an optional `--mcp-status` arg and forwards it to `updateIssue`. |
 | `lib/github/issues.js` | **Modify** | `formatIterationComment` accepts optional `mcpStatus` and renders an extra `**MCP:**` line under the table when present. |
@@ -675,11 +675,11 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 - Modify: `lib/github/issues.js` (`formatIterationComment`, `updateIssue`, exports)
 - Modify: `lib/github/index.js` (`update-issue` CLI handler)
 - Modify: `ralph-loop` (`post_iteration_comment` plumbing)
-- Create or extend: `lib/github/__tests__/issues.test.js`
+- Extend: `lib/github/issues.test.js` (already exists, flat next to source — project convention)
 
 - [ ] **Step 1: Write the failing unit test for `formatIterationComment`**
 
-Locate or create `lib/github/__tests__/issues.test.js`. If it does not exist, create it; if it does, append the new `describe` block.
+Append to `lib/github/issues.test.js` (it already exists alongside `issues.js`):
 
 ```javascript
 'use strict';
