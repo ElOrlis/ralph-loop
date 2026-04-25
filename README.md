@@ -15,6 +15,7 @@ Ralph Loop is a production-ready tool that iteratively calls Claude to complete 
 - [Command-Line Flags](#command-line-flags)
 - [PRD File Format](#prd-file-format)
 - [Example PRD Files](#example-prd-files)
+- [How-To Guides](#how-to-guides)
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
@@ -23,13 +24,14 @@ Ralph Loop is a production-ready tool that iteratively calls Claude to complete 
 ## Features
 
 - **Iterative Task Completion**: Automatically works through PRD tasks in priority order
-- **Smart Resume**: Continue from where you left off after interruption
-- **Progress Tracking**: Detailed logging with timestamps and status updates
-- **PRD Analysis**: Get quality feedback on your PRD before running
-- **Real-Time Visualization**: Live progress indicators showing task status
+- **Independent Verification**: Ralph (not Claude) verifies acceptance criteria via shell, http, file-exists, grep, or manual checks using inline type hints
+- **Dependency Graph**: Tasks declare `Depends On:` relationships; Ralph topo-sorts the queue, marks blocked tasks, and merges completed dependency branches before each iteration
+- **GitHub Integration**: Auto-creates issues, posts iteration comments, manages a Projects v2 board with Priority / Category / Iteration Count / Criteria Pass Rate / Ralph Status fields
+- **Per-Task Git Branching & PRs**: Every task gets its own branch and draft PR; iterations commit with structured `Ralph-*` trailers and the PR flips to ready when all criteria pass
+- **Smart Resume**: Continue from where you left off after interruption, with crosscheck warnings for JSON/GitHub state drift
+- **PRD Analysis**: Quality feedback on your PRD (including dependency-graph analysis) before running
 - **Markdown or JSON**: Write PRDs in markdown and auto-convert to JSON
-- **Error Handling**: Comprehensive error messages with actionable solutions
-- **Verbose/Debug Modes**: Detailed logging for troubleshooting
+- **Dry-Run, Verbose, Debug Modes**: Inspect the planned prompt or surface full Claude output for troubleshooting
 
 ## Prerequisites
 
@@ -229,7 +231,11 @@ ralph-loop my-project.md --verbose --max-iterations 25
 | `--verbose` | Show detailed progress and API metadata | Off |
 | `--debug` | Show full Claude output and internal state | Off |
 | `--resume` | Resume from last checkpoint | Off |
-| `--analyze-prd` | Analyze PRD quality and exit | Off |
+| `--analyze-prd` | Analyze PRD quality (incl. dependency graph) and exit | Off |
+| `--dry-run` | Print the prompt that would be sent to Claude and exit | Off |
+| `--no-github` | Skip all GitHub issue/Projects v2 activity (implies `--no-branch`) | Off |
+| `--no-branch` | Skip per-task branch / PR creation; commit on the current branch | Off |
+| `--repo owner/name` | Override target repo (otherwise PRD `repository` field, then `git remote`) | - |
 | `--help` | Show comprehensive help message | - |
 
 ## PRD File Format
@@ -246,13 +252,16 @@ Brief project overview (optional)
 ## Task: Task Title
 **Category**: Category Name
 **Priority**: 1
+**Depends On**: task-0
 
 Task description goes here.
 
 ### Acceptance Criteria
-- First acceptance criterion
-- Second criterion with test: ./test-script.sh passes
-- Third criterion
+- Unit tests pass `[shell: npm test -- auth.test.js]`
+- Login returns 200 `[http: POST http://localhost:3000/auth/login -> 200]`
+- Config file exists `[file-exists: ./config/auth.json]`
+- Route is registered `[grep: "app\.use.*auth" in ./src/routes/index.js]`
+- Manual verification step (skipped by Ralph)
 
 ## Task: Second Task Title
 **Category**: Another Category
@@ -338,6 +347,110 @@ Shows common mistakes (use with `--analyze-prd` to see suggestions):
 ```bash
 ralph-loop examples/bad-prd-example.md --analyze-prd
 ```
+
+## How-To Guides
+
+Step-by-step recipes for the recent enhancements. Each guide is independent — pick the ones you need.
+
+### How to write machine-verifiable acceptance criteria
+
+Ralph (not Claude) decides whether a criterion passes. Add an **inline type hint** at the end of any bullet so Ralph can run an actual check.
+
+| Type | Syntax | What Ralph does |
+|------|--------|-----------------|
+| `shell` | `` `[shell: <cmd>]` `` | Runs `<cmd>`; pass = exit 0 |
+| `http` | `` `[http: <METHOD> <url> -> <status>]` `` | Sends request; pass = matching status code |
+| `file-exists` | `` `[file-exists: <path>]` `` | Pass = path exists |
+| `grep` | `` `[grep: "<regex>" in <path>]` `` | Pass = regex matches in file |
+| `manual` | (no hint, or `` `[manual]` ``) | Skipped — Ralph cannot verify, treat as advisory |
+
+**Example:**
+```markdown
+### Acceptance Criteria
+- Auth unit tests pass `[shell: npm test -- auth.test.js]`
+- /auth/login returns 200 `[http: POST http://localhost:3000/auth/login -> 200]`
+- Migration file created `[file-exists: ./db/migrations/001_users.sql]`
+- Route is wired up `[grep: "app\.use.*auth" in ./src/routes/index.js]`
+```
+
+**Tip:** Run `ralph-loop my-prd.md --analyze-prd` first — the analyzer flags vague criteria that lack a hint.
+
+### How to declare task dependencies
+
+Add a `**Depends On**:` line in markdown (or `dependsOn: ["task-1"]` in JSON). Ralph topo-sorts the queue and skips any task whose deps haven't passed yet.
+
+```markdown
+## Task: Add JWT middleware
+**Category**: Backend
+**Priority**: 3
+**Depends On**: task-1, task-2
+```
+
+What you get:
+- Blocked tasks: `status: "blocked"` + `blockedBy: [...]` in PRD JSON, a `blocked` label on the GitHub issue, and `Ralph Status = Blocked` on the project board.
+- When `--no-branch` is *not* set, Ralph runs `git merge --no-edit` on each completed dep branch into the current task branch before invoking Claude. On conflict it aborts the merge, marks the task blocked, comments on the issue, and moves on.
+- Cycles, self-deps, and dangling references are caught at validation and reported by `--analyze-prd` under a **Dependency Analysis** section.
+
+### How to enable GitHub Projects v2 integration
+
+1. Refresh your `gh` token with project scopes (one-time):
+   ```bash
+   gh auth refresh -s project,read:project,write:project
+   ```
+2. Tell Ralph which repo to use (pick one):
+   - Pass `--repo owner/name` on the command line, OR
+   - Add `"repository": "owner/name"` to your PRD JSON, OR
+   - Run from a clone whose `git remote origin` already points there.
+3. Run normally — `ralph-loop my-prd.md`. On first run Ralph creates one Projects v2 board titled after your PRD with these fields: **Priority** (number), **Category** (single-select), **Iteration Count** (number), **Criteria Pass Rate** (0.0–1.0), **Ralph Status** (Pending / In Progress / Passed / Failed / Stalled / Blocked).
+4. Ralph populates `githubProject` at the PRD root and `projectItemId` on each task. Don't edit those by hand.
+
+To opt out for a single run: `--no-github` (also disables branching).
+
+### How to use per-task branching and pull requests
+
+Enabled by default whenever GitHub is on. For each task Ralph:
+
+1. Forks `ralph/<prd-slug>/<task-id>-<title-slug>` off the branch you launched from.
+2. Commits each iteration with structured trailers:
+   ```
+   task-3: add JWT validation middleware
+
+   Iteration 2/15. Criteria: 2/3 passing.
+
+   Ralph-Task-Id: task-3
+   Ralph-Issue: #42
+   Ralph-Status: in-progress
+   ```
+   `Ralph-Status` is one of `in-progress`, `passed`, or `failed`. Failed iterations still commit so history stays complete.
+3. Opens a draft PR after the first commit with `Closes #<issueNumber>`.
+4. Calls `gh pr ready` once every criterion passes.
+
+Skip branching/PRs for a single run with `--no-branch`. Combine with `--no-github` to run fully offline.
+
+### How to preview a run without invoking Claude
+
+Use `--dry-run` to see exactly what Ralph would send:
+
+```bash
+ralph-loop my-prd.md --dry-run
+```
+
+Ralph picks the next task, builds the prompt (including verification commands), prints it, and exits — no Claude call, no commit, no GitHub activity. Useful for sanity-checking inline type hints, dependency ordering, and `--analyze-prd` recommendations before burning iterations.
+
+### How to interpret `--analyze-prd` output
+
+Run before your first real loop:
+
+```bash
+ralph-loop my-prd.md --analyze-prd
+```
+
+You'll get sections for:
+- **Quality feedback** on each task (vague criteria, missing test commands, ambiguous priorities).
+- **Dependency Analysis** — cycles, self-dependencies, dangling `dependsOn` references, and the resolved execution order.
+- Suggested rewrites you can paste back into your PRD.
+
+Re-run `--analyze-prd` after edits until the output is clean, then drop the flag to start the real loop.
 
 ## Testing
 
