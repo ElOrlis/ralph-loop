@@ -304,6 +304,19 @@ test_help_documents_mcp() {
     fi
 }
 
+# Test 17: Help documents --report flag
+test_help_documents_report() {
+    echo ""
+    echo "Test 17: --help mentions --report flag"
+    local help_output
+    help_output=$("$RALPH_LOOP" --help 2>&1 || true)
+    if echo "$help_output" | grep -q -- "--report"; then
+        pass "--help documents --report flag"
+    else
+        fail "--help does not mention --report flag"
+    fi
+}
+
 # Main test execution
 main() {
     echo "========================================"
@@ -328,6 +341,7 @@ main() {
     test_help_documents_phase5
     test_help_documents_phase6
     test_help_documents_mcp
+    test_help_documents_report
 
     cleanup
 
