@@ -14,6 +14,7 @@ VERBOSE=false
 DEBUG=false
 RESUME=false
 ANALYZE_PRD=false
+REPORT_MODE=false
 DRY_RUN=false
 GITHUB_ENABLED=true
 MCP_ENABLED=false
@@ -82,6 +83,10 @@ OPTIONS:
   --debug                 Show full Claude output and internal state
   --resume                Resume from last checkpoint in progress.txt
   --analyze-prd           Analyze PRD quality and suggest improvements
+  --report                Print a project-status report for the PRD
+                          (iteration counts, per-task breakdown,
+                          criteria hotspots, MCP health). Read-only,
+                          offline. Mutually exclusive with --analyze-prd.
   --help                  Show this help message
   --dry-run               Show next prompt and exit (don't call Claude)
   --no-github             Disable all GitHub integration
@@ -281,6 +286,12 @@ parse_arguments() {
                 ANALYZE_PRD=true
                 shift
                 ;;
+            --report)
+                REPORT_MODE=true
+                GITHUB_ENABLED=false
+                BRANCH_ENABLED=false
+                shift
+                ;;
             --dry-run)
                 DRY_RUN=true
                 shift
@@ -323,6 +334,11 @@ parse_arguments() {
     if [ -z "$PRD_FILE" ]; then
         error_exit "Required argument <prd-file> is missing" "Usage: ./ralph-loop <prd-file> [OPTIONS]
 Example: ./ralph-loop my-feature.md"
+    fi
+
+    if [ "$REPORT_MODE" = true ] && [ "$ANALYZE_PRD" = true ]; then
+        error_exit "--report and --analyze-prd are mutually exclusive." \
+            "Pick one — --report is offline status, --analyze-prd calls Claude for narrative feedback."
     fi
 }
 
@@ -1453,6 +1469,23 @@ crosscheck_issues() {
         echo -e "${YELLOW}[WARN] Found $warnings issue state inconsistencies. Local JSON is source of truth.${NC}"
     elif [ "$VERBOSE" = true ]; then
         echo -e "${BLUE}[INFO] Issue cross-check passed — all consistent${NC}"
+    fi
+}
+
+# Print a project-status report (offline, read-only)
+run_report() {
+    local json_file="$1"
+    local progress_file="$2"
+
+    # Validate the JSON parses
+    if ! jq empty "$json_file" 2>/dev/null; then
+        error_exit "PRD JSON at $json_file is invalid." "Run --analyze-prd to diagnose, or fix the file manually."
+    fi
+
+    if ! node "$SCRIPT_DIR/lib/report/index.js" report \
+            --task-file "$json_file" \
+            --progress-file "$progress_file"; then
+        error_exit "Report generation failed." "See output above for details."
     fi
 }
 
@@ -2954,6 +2987,14 @@ main() {
     # Resolve GitHub repository
     resolve_target_repo
     ensure_github_project
+
+    # If report mode, print status report and exit
+    if [ "$REPORT_MODE" = true ]; then
+        local prd_dir
+        prd_dir="$(dirname "$JSON_FILE")"
+        run_report "$JSON_FILE" "${prd_dir}/progress.txt"
+        exit 0
+    fi
 
     # If analyze mode, run analysis and exit
     if [ "$ANALYZE_PRD" = true ]; then
