@@ -429,6 +429,58 @@ EOF
     fi
 }
 
+# Test 12: Suggested Type Hints section in analyze-prd output
+test_analyze_prd_includes_suggested_type_hints() {
+    echo ""
+    echo "Test 12: --analyze-prd appends Suggested Type Hints section"
+    local sandbox
+    sandbox=$(mktemp -d)
+    cat > "$sandbox/prd.json" <<'EOF'
+{
+  "title": "Test PRD",
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Backend",
+      "category": "backend",
+      "priority": 1,
+      "passes": false,
+      "acceptanceCriteria": [
+        {"text": "Test: Run `npm test` and verify all pass", "type": "manual"},
+        {"text": "Validation rejects empty strings", "type": "manual"}
+      ]
+    }
+  ]
+}
+EOF
+
+    # Stub claude so the analyze-prd narrative call doesn't hit the real network
+    local stub_dir="$sandbox/bin"
+    mkdir -p "$stub_dir"
+    cat > "$stub_dir/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "Mocked Claude analysis."
+STUB
+    chmod +x "$stub_dir/claude"
+
+    local output
+    output=$(PATH="$stub_dir:$PATH" "$RALPH_LOOP" "$sandbox/prd.json" --analyze-prd --no-github 2>&1 || true)
+
+    if echo "$output" | grep -q "Suggested Type Hints"; then
+        pass "analyze-prd includes Suggested Type Hints section"
+    else
+        fail "analyze-prd did not include Suggested Type Hints. Got: $output"
+    fi
+
+    if echo "$output" | grep -q "shell: npm test"; then
+        pass "suggested rewrite mentions [shell: npm test]"
+    else
+        fail "suggested rewrite missing [shell: npm test]"
+    fi
+
+    rm -rf "$sandbox"
+}
+
 # Main test execution
 main() {
     echo "========================================"
@@ -448,6 +500,7 @@ main() {
     test_markdown_analysis
     test_analyze_prd_reports_dependency_stats
     test_analyze_prd_reports_cycle_warning
+    test_analyze_prd_includes_suggested_type_hints
 
     cleanup
 

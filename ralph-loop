@@ -1581,6 +1581,27 @@ analyze_prd() {
         echo ""
     fi
 
+    # Suggested Type Hints (Phase B): scan untyped criteria for known patterns
+    local suggest_json
+    suggest_json=$(node "$SCRIPT_DIR/lib/criteria/index.js" suggest --task-file "$json_file" 2>/dev/null || echo '{"totalSuggestions":0,"tasks":[]}')
+    local suggest_count
+    suggest_count=$(echo "$suggest_json" | jq -r '.totalSuggestions // 0')
+    if [ "$suggest_count" -gt 0 ]; then
+        echo -e "${BLUE}Suggested Type Hints:${NC}"
+        echo "$suggest_json" | jq -r '
+            .tasks[]
+            | select((.suggestions | length) > 0)
+            | "  Task: \(.id) (\(.title))",
+              (.suggestions[] |
+                "    Criterion \(.index + 1): \"\(.original)\"",
+                "      Suggested:  [\(.suggestion.type): \(.suggestion.value)]"
+              )
+        '
+        echo ""
+        echo "  $suggest_count suggestion(s). Apply manually to raise Executable Coverage."
+        echo ""
+    fi
+
     # Create analysis prompt for Claude
     local analysis_prompt="You are a PRD quality analyzer. Analyze the following Product Requirements Document (PRD) and provide detailed feedback on its quality.
 
