@@ -43,6 +43,7 @@ TEST_SCRIPTS=(
     "test-git-branching.sh"
     "test-phase5-failed-iteration.sh"
     "test-dependency-graph.sh"
+    "test-mcp.sh"
 )
 
 # Run each test suite

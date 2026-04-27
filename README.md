@@ -236,6 +236,7 @@ ralph-loop my-project.md --verbose --max-iterations 25
 | `--no-github` | Skip all GitHub issue/Projects v2 activity (implies `--no-branch`) | Off |
 | `--no-branch` | Skip per-task branch / PR creation; commit on the current branch | Off |
 | `--repo owner/name` | Override target repo (otherwise PRD `repository` field, then `git remote`) | - |
+| `--mcp` | Enable `mcpls` as an MCP server for Claude (opt-in, experimental) | Off |
 | `--help` | Show comprehensive help message | - |
 
 ## PRD File Format
@@ -710,6 +711,31 @@ and moves to the next non-blocked task.
 
 Cycles and dangling-`dependsOn` references are caught at validation time and by
 `--analyze-prd`.
+
+## Phase A — MCP / LSP Superpower (`--mcp`)
+
+### `--mcp` (opt-in, experimental)
+
+Enables [`mcpls`](https://github.com/bug-ops/mcpls) as an MCP server for
+Claude during each iteration, giving Claude LSP-backed tools (go-to-def,
+references, diagnostics, hover, completion) in any language whose
+project markers `mcpls` recognizes.
+
+Requirements:
+- `mcpls` binary on `PATH`
+- One or more LSP servers installed and on `PATH` (rust-analyzer,
+  pyright, gopls, typescript-language-server, etc.)
+
+Failure modes:
+- If `mcpls` is missing at startup, `ralph-loop` aborts with a clear
+  error.
+- If MCP misbehaves mid-loop, the iteration continues with status
+  `MCP: degraded` recorded in `progress.txt` and (when GitHub is
+  enabled) on the issue comment.
+
+See `docs/superpowers/specs/2026-04-24-mcpls-phase-a-design.md` for
+details. SymDex integration and Ralph-side LSP usage are deferred to
+phases B and C.
 
 ## Contributing
 
