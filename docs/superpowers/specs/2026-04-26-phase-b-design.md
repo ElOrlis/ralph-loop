@@ -50,14 +50,14 @@ The report has four sections, in order:
 
 1. **Run Summary** — total iterations used, max iterations, tasks total/passed/blocked/in-progress, elapsed wall-clock time (when derivable from `progress.txt` ITERATION timestamps), MCP `degraded` rate (count of degraded iterations / total iterations), GitHub API call count when available.
 2. **Per-Task Breakdown** — one row per task: id, title, status (`passed`/`in-progress`/`blocked`/`pending`), priority, attempts, criteria pass rate (e.g. `4/5`), `dependsOn`, last iteration touched.
-3. **Criteria Hotspots** — list of criteria that have failed in 2+ iterations across the run, sorted by failure count desc. Each entry: task id, criterion text (truncated), fail count, last error message (truncated to ~80 chars).
+3. **Criteria Hotspots** — list of criteria with `attempts >= 2` (ralph-loop's per-criterion failure counter, reset on pass), sorted by attempt count desc. Each entry: task id, criterion text (truncated), failure count, last error message (truncated to ~80 chars).
 4. **MCP Health** (only when MCP was enabled in any iteration) — count of `ok` / `degraded` / `off` lines per iteration; pointer to any sidecar `mcp-iteration-N.log` files.
 
 Output is text (matching existing `--analyze-prd` aesthetic — ANSI color, box-drawing headers). No JSON output in phase B; can be added later.
 
 #### Data sources
 
-- **PRD JSON** — primary source. Tasks already track `passes`, `attempts`, `completedAt`, `criteriaResults` (per-criterion pass/fail history), `dependsOn`, `status`, `blockedBy`.
+- **PRD JSON** — primary source. Tasks track `passes`, `attempts`, `completedAt`, `criteriaResults` (flat per-criterion `{criterion, passed, error?, attempts}` records — overwritten each iteration; `attempts` accumulates failures and resets on pass), `dependsOn`, `status`, `blockedBy`.
 - **`progress.txt`** — secondary. Line-parses `ITERATION N/MAX` blocks and any `MCP: <status>` markers to compute iteration count and MCP degradation rate.
 - **No git introspection in phase B.** Commit trailers are out of scope; everything we need is already in the JSON + progress.txt.
 

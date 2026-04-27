@@ -50,6 +50,8 @@ Create `lib/report/aggregator.test.js`:
 
 const { aggregate } = require('./aggregator');
 
+// Note: criteriaResults is flat per-criterion (ralph-loop overwrites the
+// whole array each iteration; failure counts accumulate in `attempts`).
 const samplePrd = {
   tasks: [
     {
@@ -64,8 +66,8 @@ const samplePrd = {
         { text: 'Another' },
       ],
       criteriaResults: [
-        [{ passed: false, error: 'oops' }, { passed: false, error: 'oops' }, { passed: true }],
-        [{ passed: true }],
+        { criterion: 0, passed: true, attempts: 2, error: 'connection refused' },
+        { criterion: 1, passed: true, attempts: 0 },
       ],
       status: 'ready',
       dependsOn: [],
@@ -77,7 +79,9 @@ const samplePrd = {
       passes: false,
       attempts: 1,
       acceptanceCriteria: [{ text: 'Something' }],
-      criteriaResults: [[{ passed: false, error: 'still failing' }]],
+      criteriaResults: [
+        { criterion: 0, passed: false, attempts: 1, error: 'still failing' },
+      ],
       status: 'blocked',
       blockedBy: ['task-1'],
       dependsOn: ['task-1'],
@@ -133,7 +137,7 @@ describe('aggregate', () => {
     });
   });
 
-  test('hotspots include criteria with 2+ failures, sorted desc', () => {
+  test('hotspots include criteria with attempts >= 2, sorted desc', () => {
     const out = aggregate(samplePrd, sampleProgress);
     expect(out.hotspots).toHaveLength(1);
     expect(out.hotspots[0]).toMatchObject({
@@ -141,7 +145,7 @@ describe('aggregate', () => {
       criterionIndex: 0,
       failCount: 2,
     });
-    expect(out.hotspots[0].lastError).toContain('oops');
+    expect(out.hotspots[0].lastError).toContain('connection refused');
   });
 
   test('mcp section reports counts and rate', () => {
@@ -180,10 +184,9 @@ function aggregate(prdJson, progressText) {
   const tasks = tasksRaw.map((t) => {
     const criteria = Array.isArray(t.acceptanceCriteria) ? t.acceptanceCriteria : [];
     const results = Array.isArray(t.criteriaResults) ? t.criteriaResults : [];
-    const lastResults = results.length ? results[results.length - 1] : [];
     let criteriaPassed = 0;
     for (let i = 0; i < criteria.length; i++) {
-      const r = lastResults[i];
+      const r = results[i];
       if (r && r.passed === true) criteriaPassed += 1;
     }
     let status;
@@ -227,27 +230,23 @@ function countIterations(progressText) {
 }
 
 function computeHotspots(tasksRaw) {
+  // criteriaResults is flat: one entry per criterion, with `attempts`
+  // counting consecutive failures (reset on pass). A hotspot is any
+  // criterion whose `attempts` is >= 2.
   const out = [];
   for (const t of tasksRaw) {
     const criteria = Array.isArray(t.acceptanceCriteria) ? t.acceptanceCriteria : [];
     const results = Array.isArray(t.criteriaResults) ? t.criteriaResults : [];
     for (let i = 0; i < criteria.length; i++) {
-      let failCount = 0;
-      let lastError = '';
-      for (const iterResults of results) {
-        const r = iterResults[i];
-        if (r && r.passed === false) {
-          failCount += 1;
-          if (r.error) lastError = r.error;
-        }
-      }
-      if (failCount >= 2) {
+      const r = results[i];
+      const attempts = r && typeof r.attempts === 'number' ? r.attempts : 0;
+      if (attempts >= 2) {
         out.push({
           taskId: t.id,
           criterionIndex: i,
           criterionText: typeof criteria[i] === 'string' ? criteria[i] : criteria[i].text,
-          failCount,
-          lastError,
+          failCount: attempts,
+          lastError: r && r.error ? r.error : '',
         });
       }
     }
@@ -661,8 +660,7 @@ write_fixture() {
       "attempts": 2,
       "acceptanceCriteria": [{"text": "Tests pass", "type": "manual"}],
       "criteriaResults": [
-        [{"passed": false, "error": "boom"}],
-        [{"passed": true}]
+        {"criterion": 0, "passed": true, "attempts": 1, "error": "boom"}
       ],
       "completedAt": "2026-04-25T10:00:00Z"
     },
