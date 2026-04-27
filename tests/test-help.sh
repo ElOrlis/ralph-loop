@@ -291,6 +291,19 @@ test_help_documents_phase6() {
     else fail "--help does not mention **Depends On**: markdown syntax"; fi
 }
 
+# Test 16: Help documents MCP flag
+test_help_documents_mcp() {
+    echo ""
+    echo "Test 16: --help mentions --mcp flag"
+    local help_output
+    help_output=$("$RALPH_LOOP" --help 2>&1 || true)
+    if echo "$help_output" | grep -q -- "--mcp"; then
+        pass "--help documents --mcp flag"
+    else
+        fail "--help does not mention --mcp flag"
+    fi
+}
+
 # Main test execution
 main() {
     echo "========================================"
@@ -314,6 +327,7 @@ main() {
     test_flag_examples
     test_help_documents_phase5
     test_help_documents_phase6
+    test_help_documents_mcp
 
     cleanup
 
