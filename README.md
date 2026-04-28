@@ -238,6 +238,8 @@ ralph-loop my-project.md --verbose --max-iterations 25
 | `--repo owner/name` | Override target repo (otherwise PRD `repository` field, then `git remote`) | - |
 | `--mcp` | Enable `mcpls` as an MCP server for Claude (opt-in, experimental) | Off |
 | `--report` | Print a project-status report for the PRD (offline; no API calls) | Off |
+| `--state-dir <path>` | Use a custom directory for PRD state instead of `.ralph/<slug>/` | - |
+| `--migrate-state` | Move legacy sibling-JSON / cwd-progress files into `.ralph/<slug>/` | Off |
 | `--help` | Show comprehensive help message | - |
 
 ## PRD File Format
@@ -659,6 +661,37 @@ When you run Ralph Loop, it creates the following files:
 | `progress-<timestamp>.txt` | Archived progress file (when starting fresh) |
 
 These files are created in the same directory as your input PRD file.
+
+## State directory
+
+Ralph stores all generated state for a PRD in a single directory at the repo root:
+
+```
+.ralph/<basename>-<hash4>/
+├── prd.json                      # converted/working PRD JSON
+├── progress.txt                  # current run's progress log
+├── progress-<timestamp>.txt      # archived logs from prior runs
+├── mcp-config.json               # written when --mcp is set
+├── mcp-iteration-N.log           # sidecar for degraded MCP iterations
+└── .source                       # repo-relative PRD path (collision sentinel)
+```
+
+The slug is `<basename>-<hash4>`, where `hash4` is the first 4 hex chars of `sha1(repo-relative PRD path)`. This is deterministic and survives reruns; rename or move the PRD and the slug changes.
+
+**Add `.ralph/` to your `.gitignore`** to keep generated state out of version control. Ralph prints a one-time hint on first creation but does not modify `.gitignore` for you.
+
+### Migrating from the old layout
+
+Earlier versions wrote `<basename>.json` next to the markdown PRD and `progress.txt` in cwd. If you have a PRD with that legacy state, Ralph will refuse to run until you choose:
+
+- `--migrate-state` — move the legacy files into `.ralph/<slug>/` and continue. Uses `git mv` for tracked files. One-shot; subsequent runs work normally.
+- `--state-dir <path>` — keep using a custom location. Skips the slug/repo-root logic entirely and works outside a git repo.
+
+To start fresh and ignore the legacy files, delete or move them yourself.
+
+### Slug collisions
+
+A 4-char hash means ~1-in-65k odds of two PRDs sharing a basename colliding. Ralph stores the source path inside `.ralph/<slug>/.source` and verifies it on every run; on mismatch you'll see a hard error suggesting `RALPH_SLUG_HASH_LEN=8` (any value 4–40 works).
 
 ## GitHub Projects v2 Integration
 
