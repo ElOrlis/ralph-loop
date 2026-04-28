@@ -44,6 +44,7 @@ TEST_SCRIPTS=(
     "test-phase5-failed-iteration.sh"
     "test-dependency-graph.sh"
     "test-mcp.sh"
+    "test-report.sh"
 )
 
 # Run each test suite

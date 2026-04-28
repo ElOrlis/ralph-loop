@@ -32,6 +32,7 @@ Ralph Loop is a Bash CLI tool that iteratively calls Claude Code to complete PRD
 ./tests/test-progress.sh
 ./tests/test-progress-visualization.sh
 ./tests/test-mcp.sh
+./tests/test-report.sh
 
 # JavaScript unit tests (lib modules)
 npx jest --no-coverage --testPathIgnorePatterns='user-model'
@@ -43,7 +44,7 @@ npm test
 ### Run the tool
 ```bash
 ./ralph-loop <prd-file.md> [--max-iterations N] [--verbose] [--debug] [--resume] \
-  [--analyze-prd] [--dry-run] [--no-github] [--no-branch] [--repo owner/name] [--mcp]
+  [--analyze-prd] [--dry-run] [--no-github] [--no-branch] [--repo owner/name] [--mcp] [--report]
 ```
 
 ## Architecture
@@ -54,11 +55,11 @@ The project has three distinct parts:
 
 The entire orchestrator is one Bash script with these key flows:
 
-- **Argument parsing** (`parse_arguments`) — handles flags and sets globals (`MAX_ITERATIONS`, `VERBOSE`, `DEBUG`, `RESUME`, `ANALYZE_PRD`, `DRY_RUN`, `GITHUB_ENABLED`, `BRANCH_ENABLED`, `REPO_OVERRIDE`, `MCP_ENABLED`, `MCP_CONFIG_FILE`). `--no-github` implies `--no-branch`. `--mcp` enables MCP/LSP integration via `mcpls`.
+- **Argument parsing** (`parse_arguments`) — handles flags and sets globals (`MAX_ITERATIONS`, `VERBOSE`, `DEBUG`, `RESUME`, `ANALYZE_PRD`, `DRY_RUN`, `GITHUB_ENABLED`, `BRANCH_ENABLED`, `REPO_OVERRIDE`, `MCP_ENABLED`, `MCP_CONFIG_FILE`, `REPORT_MODE`). `--no-github` implies `--no-branch`. `--mcp` enables MCP/LSP integration via `mcpls`. `--report` is mutually exclusive with `--analyze-prd` and implies `--no-github` / `--no-branch`.
 - **Markdown-to-JSON conversion** (`convert_prd_to_json`) — parses `## Task:` headers, `**Category**:`, `**Priority**:`, optional `**Depends On**:` (comma-separated task IDs), and `### Acceptance Criteria` sections. Uses `jq` for formatting.
 - **PRD validation** (`validate_prd_json`) — checks required fields (`id`, `title`, `category`, `priority`, `acceptanceCriteria`, `passes`), unique priorities, non-empty criteria arrays, and accepts optional `dependsOn`, `status`, `blockedBy` fields. Delegates dependency-graph validation (cycles, self-deps, dangling refs) to `lib/deps/index.js validate`.
 - **GitHub repo resolution** (`resolve_target_repo`) — resolves target repo via `--repo` flag > PRD `repository` field > `git remote`
-- **PRD analysis** (`analyze_prd`) — sends PRD content to Claude for quality feedback (with retry/backoff) and appends a **Dependency Analysis** section from `lib/deps`.
+- **PRD analysis** (`analyze_prd`) — sends PRD content to Claude for quality feedback (with retry/backoff) and appends a **Dependency Analysis** section from `lib/deps`. Also renders a **Suggested Type Hints** section produced by `lib/criteria/index.js suggest`, which scans untyped acceptance criteria for known patterns and proposes inline rewrites to raise Executable Coverage.
 - **Main loop** (`run_ralph_loop`) — iterates up to `MAX_ITERATIONS`:
   1. `find_next_task` — calls `node lib/deps/index.js next-task` for dep-graph-aware picking; syncs `status` (`ready`/`blocked`) and `blockedBy` back to the PRD JSON each iteration
   2. `ensure_task_issue` — creates GitHub issue if `GITHUB_ENABLED` and no `issueNumber` exists; applies/removes `blocked` label as needed
@@ -83,8 +84,12 @@ lib/
   prompt/
     index.js            # CLI: build --task-file <path> --task-id <id>
     builder.js          # Builds Claude prompts with verification commands
+  report/
+    index.js            # CLI: report --task-file <path> --progress-file <path>
+    aggregator.js       # Pure aggregator over PRD JSON + progress.txt
+    formatter.js        # Pure text formatter for the aggregator output
   criteria/
-    index.js            # CLI: verify | normalize | validate-json
+    index.js            # CLI: verify | normalize | validate-json | suggest
     schema.js           # Parse inline type hints, normalize string->object, validate
     runner.js           # Execute criteria (shell, http, file-exists, grep, manual)
   github/
@@ -140,3 +145,4 @@ A small Node.js component with SQLite (demo artifacts, not part of the main tool
 - Ralph tracks GitHub API calls per run (GITHUB_API_CALLS global) and warns at 100 calls.
 - PRD JSON root may contain `githubProject` (project metadata + field IDs); each task may contain `projectItemId`. Both optional and populated automatically.
 - MCP integration is opt-in via `--mcp`. When enabled, Ralph generates `mcp-config.json` once per run and passes `--mcp-config` to every Claude invocation. Per-iteration MCP health is captured in `progress.txt` and (when GitHub is enabled) on the issue comment.
+- Phase B: `--report` produces an offline status report; `--analyze-prd` includes deterministic type-hint suggestions for untyped criteria. Both features are read-only and make no API calls.

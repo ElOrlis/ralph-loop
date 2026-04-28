@@ -237,6 +237,7 @@ ralph-loop my-project.md --verbose --max-iterations 25
 | `--no-branch` | Skip per-task branch / PR creation; commit on the current branch | Off |
 | `--repo owner/name` | Override target repo (otherwise PRD `repository` field, then `git remote`) | - |
 | `--mcp` | Enable `mcpls` as an MCP server for Claude (opt-in, experimental) | Off |
+| `--report` | Print a project-status report for the PRD (offline; no API calls) | Off |
 | `--help` | Show comprehensive help message | - |
 
 ## PRD File Format
@@ -452,6 +453,34 @@ You'll get sections for:
 - Suggested rewrites you can paste back into your PRD.
 
 Re-run `--analyze-prd` after edits until the output is clean, then drop the flag to start the real loop.
+
+- The output now includes a **Suggested Type Hints** section that
+  scans untyped acceptance criteria for known patterns (e.g.
+  `` Test: Run `cmd` `` → `[shell: cmd]`) and proposes inline rewrites
+  to raise Executable Coverage. The suggestions are advisory; apply
+  them manually.
+
+### `--report` (Phase B)
+
+Aggregates an in-progress or completed PRD's iteration data into a
+status report. Offline; no API calls. Reads the PRD JSON and the
+companion `progress.txt` produced by previous runs.
+
+```bash
+./ralph-loop my-prd.md --report
+```
+
+Output sections:
+- **Run Summary** — total iterations used, task counts by status.
+- **Per-Task Breakdown** — one row per task: status, attempts,
+  criteria pass rate, dependencies.
+- **Criteria Hotspots** — criteria with `attempts >= 2`, with last
+  error.
+- **MCP Health** — counts of `ok` / `degraded` / `off` iterations
+  (only shown when MCP was used).
+
+`--report` is mutually exclusive with `--analyze-prd`. It implicitly
+disables GitHub integration.
 
 ## Testing
 
