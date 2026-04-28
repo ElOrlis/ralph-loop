@@ -162,8 +162,11 @@ test_repo_flag_in_ralph_loop() {
 }
 EOF
 
+    local s
+    s=$(mktemp -d)
     local output exit_code
-    output=$("$PROJECT_ROOT/ralph-loop" "$TEST_DIR/test-prd.json" --dry-run --repo test/repo 2>&1) && exit_code=0 || exit_code=$?
+    output=$("$PROJECT_ROOT/ralph-loop" "$TEST_DIR/test-prd.json" --state-dir "$s" --dry-run --repo test/repo 2>&1) && exit_code=0 || exit_code=$?
+    rm -rf "$s"
 
     if echo "$output" | grep -q "Unknown option: --repo"; then
         fail "--repo flag was rejected as unknown option. Output: $output"
@@ -194,8 +197,11 @@ test_no_github_skips_resolution() {
 }
 EOF
 
+    local s2
+    s2=$(mktemp -d)
     local output
-    output=$("$PROJECT_ROOT/ralph-loop" "$TEST_DIR/test-prd2.json" --dry-run --no-github --verbose 2>&1)
+    output=$("$PROJECT_ROOT/ralph-loop" "$TEST_DIR/test-prd2.json" --state-dir "$s2" --dry-run --no-github --verbose 2>&1)
+    rm -rf "$s2"
 
     if echo "$output" | grep -q "Target GitHub repo"; then
         fail "--no-github should skip repo resolution"

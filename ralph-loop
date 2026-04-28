@@ -19,6 +19,10 @@ DRY_RUN=false
 GITHUB_ENABLED=true
 MCP_ENABLED=false
 MCP_CONFIG_FILE=""
+STATE_DIR=""
+STATE_DIR_OVERRIDE=""
+MIGRATE_STATE=false
+SOURCE_REL_PATH=""
 REPO_OVERRIDE=""
 TARGET_REPO=""
 GITHUB_API_CALLS=0
@@ -66,7 +70,8 @@ comprehensive help system and progress tracking.
    ./ralph-loop your-prd.md
 
 3. REVIEW RESULTS
-   Check progress.txt for detailed logs and your-prd.json for final status.
+   Check .ralph/<slug>/progress.txt for detailed logs and
+   .ralph/<slug>/prd.json for final status.
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                              USAGE                                         ║
@@ -81,12 +86,17 @@ OPTIONS:
   --max-iterations N      Maximum iterations to run (default: 15)
   --verbose               Show detailed progress and API metadata
   --debug                 Show full Claude output and internal state
-  --resume                Resume from last checkpoint in progress.txt
+  --resume                Resume from last checkpoint in .ralph/<slug>/progress.txt
   --analyze-prd           Analyze PRD quality and suggest improvements
   --report                Print a project-status report for the PRD
                           (iteration counts, per-task breakdown,
                           criteria hotspots, MCP health). Read-only,
                           offline. Mutually exclusive with --analyze-prd.
+  --state-dir <path>      Override the .ralph/<slug>/ state directory.
+                          Skips repo-root + slug resolution. Works outside
+                          a git repo.
+  --migrate-state         Move legacy state (sibling JSON, cwd progress.txt)
+                          into .ralph/<slug>/ before running. One-shot.
   --help                  Show this help message
   --dry-run               Show next prompt and exit (don't call Claude)
   --no-github             Disable all GitHub integration
@@ -215,15 +225,16 @@ SOLUTION: Check the path to your PRD file. Use absolute paths or ensure you're
 • Include specific test commands in acceptance criteria
 • Set realistic max-iterations based on PRD complexity
 • Use --verbose to understand what's happening during execution
-• Check progress.txt regularly to see detailed logs
+• Check .ralph/<slug>/progress.txt regularly to see detailed logs
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                         FILES CREATED                                      ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
-  your-prd.json          Converted PRD with task status
-  progress.txt           Detailed iteration logs and learnings
-  progress-*.txt         Archived logs from previous runs
+  .ralph/<slug>/prd.json          Converted PRD with task status
+  .ralph/<slug>/progress.txt      Detailed iteration logs and learnings
+  .ralph/<slug>/progress-*.txt    Archived logs from previous runs
+  .ralph/<slug>/.source           Sentinel: repo-relative PRD path
 
 EOF
 }
@@ -316,6 +327,17 @@ parse_arguments() {
                 REPO_OVERRIDE="$2"
                 shift 2
                 ;;
+            --state-dir)
+                if [ -z "${2:-}" ]; then
+                    error_exit "--state-dir requires a path argument" "Example: ./ralph-loop my-prd.md --state-dir /tmp/ralph-state"
+                fi
+                STATE_DIR_OVERRIDE="$2"
+                shift 2
+                ;;
+            --migrate-state)
+                MIGRATE_STATE=true
+                shift
+                ;;
             -*)
                 error_exit "Unknown option: $1" "Run './ralph-loop --help' to see all available options."
                 ;;
@@ -359,18 +381,230 @@ Try using an absolute path: $(pwd)/$PRD_FILE"
     fi
 }
 
+# Resolve the per-PRD state directory: .ralph/<slug>/ at repo root, or the
+# user-provided --state-dir. Sets STATE_DIR, JSON_FILE, PROGRESS_FILE,
+# MCP_CONFIG_FILE, SOURCE_REL_PATH globals. Writes a .source sentinel and
+# verifies it on subsequent runs. Prints a one-time .gitignore hint when
+# the top-level .ralph/ is first created.
+resolve_state_dir() {
+    local resolver_args=(--prd "$PRD_FILE")
+    if [ -n "$STATE_DIR_OVERRIDE" ]; then
+        resolver_args+=(--state-dir "$STATE_DIR_OVERRIDE")
+    fi
+
+    local resolver_json
+    if ! resolver_json=$(node "$SCRIPT_DIR/lib/state/index.js" resolve-paths "${resolver_args[@]}" 2>&1); then
+        error_exit "Failed to resolve state directory: $resolver_json" \
+            "Ensure you are inside a git repo, or pass --state-dir <path>."
+    fi
+
+    STATE_DIR=$(echo "$resolver_json" | jq -r '.stateDir')
+    JSON_FILE=$(echo "$resolver_json" | jq -r '.jsonFile')
+    PROGRESS_FILE=$(echo "$resolver_json" | jq -r '.progressFile')
+    MCP_CONFIG_FILE=$(echo "$resolver_json" | jq -r '.mcpConfigFile')
+    SOURCE_REL_PATH=$(echo "$resolver_json" | jq -r '.source // ""')
+
+    # Detect first-creation of the top-level .ralph/ for the .gitignore hint.
+    local ralph_root_existed=true
+    if [ -z "$STATE_DIR_OVERRIDE" ]; then
+        local ralph_root="$(dirname "$STATE_DIR")"
+        if [ ! -d "$ralph_root" ]; then
+            ralph_root_existed=false
+        fi
+    fi
+
+    # Orphan warning: if STATE_DIR doesn't exist yet, check for sibling dirs
+    # with the same basename (possibly orphaned by a PRD rename/move).
+    if [ -z "$STATE_DIR_OVERRIDE" ] && [ ! -d "$STATE_DIR" ]; then
+        local repo_root
+        repo_root="$(dirname "$(dirname "$STATE_DIR")")"
+        local prd_basename_noext
+        prd_basename_noext="$(basename "${PRD_FILE%.*}")"
+        if [ -d "${repo_root}/.ralph" ]; then
+            local sibling
+            for sibling in "${repo_root}/.ralph/${prd_basename_noext}"-*; do
+                [ -d "$sibling" ] || continue
+                # Skip if this sibling IS the STATE_DIR we're about to create.
+                [ "$sibling" = "$STATE_DIR" ] && continue
+                echo -e "${YELLOW}[WARN] Found .ralph/$(basename "$sibling")/ — possibly orphaned by a PRD move. Pass --state-dir ${repo_root}/.ralph/$(basename "$sibling") to reuse it.${NC}"
+            done
+        fi
+    fi
+
+    mkdir -p "$STATE_DIR"
+
+    if [ "$ralph_root_existed" = false ]; then
+        local ralph_root="$(dirname "$STATE_DIR")"
+        echo -e "${BLUE}[INFO] Created $ralph_root. Add '.ralph/' to your .gitignore to keep generated state out of version control.${NC}"
+    fi
+
+    # Write or verify the .source sentinel for slug-collision detection.
+    if [ -n "$SOURCE_REL_PATH" ]; then
+        local source_file="$STATE_DIR/.source"
+        if [ -f "$source_file" ]; then
+            local existing
+            existing=$(cat "$source_file")
+            if [ "$existing" != "$SOURCE_REL_PATH" ]; then
+                error_exit "Slug collision detected for $STATE_DIR" \
+                    "This directory was previously used for PRD '$existing' but the current PRD resolves to '$SOURCE_REL_PATH'. Bump the slug hash length: RALPH_SLUG_HASH_LEN=8 ./ralph-loop ..."
+            fi
+        else
+            echo "$SOURCE_REL_PATH" > "$source_file"
+        fi
+    fi
+
+    if [ "$DEBUG" = true ]; then
+        echo -e "${BLUE}[DEBUG] STATE_DIR: $STATE_DIR${NC}"
+        echo -e "${BLUE}[DEBUG] JSON_FILE: $JSON_FILE${NC}"
+        echo -e "${BLUE}[DEBUG] PROGRESS_FILE: $PROGRESS_FILE${NC}"
+    fi
+}
+
+# Print legacy state paths (one per line) for the current PRD. Used by both
+# pre-flight and migration. Skipped when STATE_DIR_OVERRIDE is set.
+detect_legacy_state() {
+    if [ -n "$STATE_DIR_OVERRIDE" ]; then
+        return 0
+    fi
+
+    local prd_dir
+    prd_dir="$(dirname "$PRD_FILE")"
+    local prd_basename
+    prd_basename="$(basename "$PRD_FILE")"
+    local prd_name="${prd_basename%.*}"
+
+    # Sibling JSON: skip when the PRD itself IS the JSON.
+    if [[ ! "$PRD_FILE" =~ \.json$ ]]; then
+        local sibling_json="${prd_dir}/${prd_name}.json"
+        if [ -f "$sibling_json" ]; then
+            echo "$sibling_json"
+        fi
+    fi
+
+    # cwd progress.txt
+    if [ -f "./progress.txt" ]; then
+        echo "./progress.txt"
+    fi
+
+    # cwd progress-*.txt archives
+    local archive
+    for archive in ./progress-*.txt; do
+        [ -e "$archive" ] || continue
+        echo "$archive"
+    done
+}
+
+# Hard-error if legacy state exists for this PRD AND STATE_DIR is empty AND
+# neither --migrate-state nor --state-dir was passed. Prevents silent orphaning.
+enforce_no_legacy() {
+    if [ -n "$STATE_DIR_OVERRIDE" ] || [ "$MIGRATE_STATE" = true ]; then
+        return 0
+    fi
+
+    # If STATE_DIR already has any canonical file, the user is past migration.
+    if [ -f "$STATE_DIR/prd.json" ] || [ -f "$STATE_DIR/progress.txt" ]; then
+        return 0
+    fi
+
+    local legacy
+    legacy="$(detect_legacy_state)"
+    if [ -z "$legacy" ]; then
+        return 0
+    fi
+
+    local indented
+    indented="$(echo "$legacy" | sed 's/^/  - /')"
+
+    error_exit "Found legacy Ralph state for this PRD:
+$indented
+
+Ralph now stores state under .ralph/<slug>/." \
+"Pick one:
+  --migrate-state          Move legacy files into $STATE_DIR
+  --state-dir <path>       Keep using a custom location
+
+To start fresh and ignore the legacy files, delete or move them yourself."
+}
+
+# When --migrate-state is set, move legacy files into STATE_DIR using `git mv`
+# for tracked files and plain `mv` otherwise. Sibling <basename>.json renames
+# to prd.json; progress.txt and archives keep their names. Hard-error if any
+# canonical file already exists at the destination.
+migrate_legacy_state() {
+    if [ "$MIGRATE_STATE" != true ]; then
+        return 0
+    fi
+
+    local legacy
+    legacy="$(detect_legacy_state)"
+    if [ -z "$legacy" ]; then
+        echo -e "${BLUE}[INFO] --migrate-state: no legacy files found; nothing to do.${NC}"
+        return 0
+    fi
+
+    # Refuse if destination already has canonical files.
+    local existing
+    existing="$(find "$STATE_DIR" -maxdepth 1 -type f \( -name 'prd.json' -o -name 'progress.txt' -o -name 'progress-*.txt' \) 2>/dev/null)"
+    if [ -n "$existing" ]; then
+        error_exit "Destination already populated; refusing to overwrite:
+$(echo "$existing" | sed 's/^/  - /')" \
+            "Inspect $STATE_DIR and remove conflicting files manually if you want to re-migrate."
+    fi
+
+    echo -e "${BLUE}[INFO] Migrating legacy state into $STATE_DIR${NC}"
+    echo "  Source                                Destination                    Transport"
+
+    local prd_dir
+    prd_dir="$(dirname "$PRD_FILE")"
+    local prd_basename
+    prd_basename="$(basename "$PRD_FILE")"
+    local prd_name="${prd_basename%.*}"
+    local sibling_json="${prd_dir}/${prd_name}.json"
+
+    local file
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        local dest
+        if [ "$file" = "$sibling_json" ]; then
+            dest="$STATE_DIR/prd.json"
+        else
+            dest="$STATE_DIR/$(basename "$file")"
+        fi
+
+        local transport="mv"
+        if git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+            if git mv "$file" "$dest" 2>/dev/null; then
+                transport="git mv"
+            else
+                # Fall back to plain mv if git mv fails (e.g., dest path quirks).
+                mv "$file" "$dest"
+            fi
+        else
+            mv "$file" "$dest"
+        fi
+
+        printf "  %-37s %-30s %s\n" "$file" "$dest" "$transport"
+    done <<< "$legacy"
+
+    echo -e "${GREEN}✓${NC} Migration complete."
+}
+
 # Convert markdown PRD to JSON format
 convert_prd_to_json() {
-    local prd_dir=$(dirname "$PRD_FILE")
-    local prd_basename=$(basename "$PRD_FILE")
-    local prd_name="${prd_basename%.*}"
-    local json_file="${prd_dir}/${prd_name}.json"
+    # JSON_FILE is set by resolve_state_dir; honor that as the canonical path.
+    local json_file="$JSON_FILE"
 
-    # If input is already JSON, just set JSON_FILE and return
+    # If input is already JSON, copy it into STATE_DIR (if not already there) and
+    # leave JSON_FILE pointing at $STATE_DIR/prd.json (set by resolve_state_dir).
+    # The user's source file becomes a read-only input.
     if [[ "$PRD_FILE" =~ \.json$ ]]; then
-        JSON_FILE="$PRD_FILE"
-        if [ "$VERBOSE" = true ]; then
-            echo -e "${BLUE}[INFO] Input is already JSON format: $JSON_FILE${NC}"
+        if [ ! -f "$JSON_FILE" ]; then
+            cp "$PRD_FILE" "$JSON_FILE"
+            if [ "$VERBOSE" = true ]; then
+                echo -e "${BLUE}[INFO] Copied $PRD_FILE → $JSON_FILE${NC}"
+            fi
+        elif [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] Using existing working JSON: $JSON_FILE${NC}"
         fi
         return 0
     fi
@@ -1712,8 +1946,7 @@ get_last_iteration() {
 
 # Prompt user for resume or fresh start
 prompt_resume_or_fresh() {
-    local prd_dir=$(dirname "$JSON_FILE")
-    local progress_file="${prd_dir}/progress.txt"
+    local progress_file="$PROGRESS_FILE"
 
     echo ""
     echo -e "${YELLOW}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -1753,8 +1986,7 @@ prompt_resume_or_fresh() {
 
 # Initialize progress file
 initialize_progress_file() {
-    local prd_dir=$(dirname "$JSON_FILE")
-    local progress_file="${prd_dir}/progress.txt"
+    local progress_file="$PROGRESS_FILE"
 
     # --dry-run must not write any files or prompt the user
     if [ "$DRY_RUN" = true ]; then
@@ -1775,7 +2007,7 @@ initialize_progress_file() {
     # If not resuming, archive existing progress file
     if [ -f "$progress_file" ] && [ "$RESUME" = false ]; then
         local timestamp=$(date +%Y%m%d-%H%M%S)
-        local archive_file="${prd_dir}/progress-${timestamp}.txt"
+        local archive_file="${STATE_DIR}/progress-${timestamp}.txt"
         mv "$progress_file" "$archive_file"
         if [ "$VERBOSE" = true ]; then
             echo -e "${BLUE}[INFO] Archived existing progress file to: $archive_file${NC}"
@@ -2372,11 +2604,8 @@ run_ralph_loop() {
         fi
     fi
 
-    # Generate MCP config once per run, alongside progress.txt.
+    # Generate MCP config once per run; MCP_CONFIG_FILE is set by resolve_state_dir.
     if [ "$MCP_ENABLED" = true ]; then
-        local prd_dir
-        prd_dir="$(dirname "$JSON_FILE")"
-        MCP_CONFIG_FILE="${prd_dir}/mcp-config.json"
         if ! node "$SCRIPT_DIR/lib/mcp/index.js" write-config --output "$MCP_CONFIG_FILE" > /dev/null; then
             error_exit "Failed to write MCP config to $MCP_CONFIG_FILE" "Check filesystem permissions and rerun."
         fi
@@ -2648,10 +2877,8 @@ Try again later or check Claude API status at https://status.anthropic.com"
             mcp_status="degraded"
             echo -e "${YELLOW}[WARN] MCP-related signal in Claude output this iteration; continuing.${NC}"
             # Sidecar log for debuggability
-            local prd_dir
-            prd_dir="$(dirname "$JSON_FILE")"
             echo "$claude_output" | grep -Ei 'mcpls|(^|[^a-z])mcp([^a-z]|$)' \
-                > "${prd_dir}/mcp-iteration-${iteration}.log" 2>/dev/null || true
+                > "${STATE_DIR}/mcp-iteration-${iteration}.log" 2>/dev/null || true
         else
             mcp_status="ok"
         fi
@@ -2979,6 +3206,9 @@ Try again later or check Claude API status at https://status.anthropic.com"
 main() {
     parse_arguments "$@"
     validate_prd_file
+    resolve_state_dir
+    enforce_no_legacy
+    migrate_legacy_state
 
     # If we get here, all validation passed
     if [ "$DEBUG" = true ]; then
@@ -3011,9 +3241,7 @@ main() {
 
     # If report mode, print status report and exit
     if [ "$REPORT_MODE" = true ]; then
-        local prd_dir
-        prd_dir="$(dirname "$JSON_FILE")"
-        run_report "$JSON_FILE" "${prd_dir}/progress.txt"
+        run_report "$JSON_FILE" "$PROGRESS_FILE"
         exit 0
     fi
 

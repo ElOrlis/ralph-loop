@@ -44,7 +44,8 @@ npm test
 ### Run the tool
 ```bash
 ./ralph-loop <prd-file.md> [--max-iterations N] [--verbose] [--debug] [--resume] \
-  [--analyze-prd] [--dry-run] [--no-github] [--no-branch] [--repo owner/name] [--mcp] [--report]
+  [--analyze-prd] [--dry-run] [--no-github] [--no-branch] [--repo owner/name] \
+  [--mcp] [--report] [--state-dir <path>] [--migrate-state]
 ```
 
 ## Architecture
@@ -138,6 +139,7 @@ A small Node.js component with SQLite (demo artifacts, not part of the main tool
 - All GitHub calls are gated behind `GITHUB_ENABLED` flag and are non-fatal (warn on failure, don't exit). `BRANCH_ENABLED` similarly gates per-task branching/PRs and is forced off when GitHub is disabled.
 - Per-task branches follow `ralph/<prd-slug>/<task-id>-<title-slug>`. Every iteration commits with `Ralph-Task-Id`, `Ralph-Issue`, and `Ralph-Status: in-progress|passed|failed` trailers — failed iterations still commit so history stays complete.
 - Dependency graph: `dependsOn` may appear in markdown as `**Depends On**: task-1, task-2`. Cycles, self-deps, and dangling refs fail validation and surface in `--analyze-prd`. Completed dep branches are merged into the task branch before each Claude call; conflicts mark the task blocked and skip the iteration.
+- All generated state lives in `.ralph/<basename>-<hash4>/` at the repo root: `prd.json`, `progress.txt`, `progress-*.txt`, `mcp-config.json`, `mcp-iteration-N.log`, and a `.source` sentinel. The slug hashes the repo-relative PRD path. Override with `--state-dir <path>`; migrate legacy sibling-JSON / cwd-progress with `--migrate-state`. Ralph hard-errors when legacy state is present without one of those flags.
 - Progress files use box-drawing characters for formatting; iteration markers follow the pattern `ITERATION N/MAX`
 - All Bash test scripts must be executable (`chmod +x`)
 - Node.js modules use CommonJS (`require`/`module.exports`) and Jest for testing

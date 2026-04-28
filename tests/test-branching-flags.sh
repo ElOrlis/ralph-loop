@@ -29,8 +29,10 @@ EOF
 test_no_branch_flag_parses() {
     echo ""; echo "Test: --no-branch flag is accepted"
     make_minimal_prd
-    local output exit_code
-    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --no-branch --dry-run 2>&1) && exit_code=0 || exit_code=$?
+    local s output exit_code
+    s=$(mktemp -d)
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --no-branch --dry-run 2>&1) && exit_code=0 || exit_code=$?
+    rm -rf "$s"
     if [ $exit_code -eq 0 ]; then pass "--no-branch accepted"; else fail "rejected --no-branch. Output: $output"; fi
 }
 
@@ -45,8 +47,10 @@ test_help_documents_no_branch() {
 test_no_github_implies_no_branch() {
     echo ""; echo "Test: --no-github implies BRANCH_ENABLED=false (debug-surface)"
     make_minimal_prd
-    local output
-    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --no-github --debug --dry-run 2>&1)
+    local s output
+    s=$(mktemp -d)
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --no-github --debug --dry-run 2>&1)
+    rm -rf "$s"
     if echo "$output" | grep -q "BRANCH_ENABLED: false"; then pass "--no-github implies --no-branch"
     else fail "--no-github did not disable branching. Output: $output"; fi
 }

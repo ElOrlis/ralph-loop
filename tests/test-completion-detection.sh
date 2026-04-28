@@ -43,7 +43,9 @@ echo ""
 echo -e "${BLUE}TEST 1: All tasks already complete - should detect immediately${NC}"
 
 test_dir=$(mktemp -d)
+state_tmp=$(mktemp -d)
 prd_file="$test_dir/completed-prd.json"
+trap "rm -rf '$test_dir' '$state_tmp'" EXIT
 
 cat > "$prd_file" << 'EOF'
 {
@@ -92,9 +94,9 @@ cat > "$prd_file" << 'EOF'
 }
 EOF
 
-# Run ralph-loop - should detect completion immediately without needing Claude
-cd "$test_dir"
-output=$("$RALPH_LOOP" "$prd_file" --max-iterations 5 2>&1) || exit_code=$?
+# Run ralph-loop with --state-dir to isolate from .ralph/ layout
+exit_code=0
+output=$("$RALPH_LOOP" "$prd_file" --state-dir "$state_tmp" --max-iterations 5 2>&1) || exit_code=$?
 
 # Verify exit code is 0 (success)
 if [ "${exit_code:-0}" -eq 0 ]; then
@@ -125,9 +127,6 @@ if echo "$output" | grep -q "Total Tasks Completed: 3 / 3"; then
 else
     test_fail "Incorrect task count in output"
 fi
-
-# Cleanup
-rm -rf "$test_dir"
 
 echo ""
 echo "════════════════════════════════════════════════════════════════════════════"

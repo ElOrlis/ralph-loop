@@ -32,8 +32,10 @@ test_find_next_task_respects_deps() {
 }
 EOF
 
-    local output
-    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1)
+    local s output
+    s=$(mktemp -d)
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --dry-run --no-github 2>&1)
+    rm -rf "$s"
     if echo "$output" | grep -q "Task: task-1 - First"; then
         pass "picks unblocked task-1 even though task-2 has lower priority"
     else
@@ -57,13 +59,19 @@ test_sync_blocked_statuses_writes_to_json() {
 }
 EOF
 
+    local s
+    s=$(mktemp -d)
     # --dry-run still exercises sync_blocked_statuses (it runs before find_next_task).
-    "$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github >/dev/null 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --dry-run --no-github >/dev/null 2>&1 || true
 
+    # Ralph copies .json input into STATE_DIR and writes all updates there;
+    # the original source file is left read-only. Read from the working copy.
+    local working_json="$s/prd.json"
     local t1_status t2_status t2_blocked_by
-    t1_status=$(jq -r '.tasks[0].status // empty' "$TEST_DIR/prd.json")
-    t2_status=$(jq -r '.tasks[1].status // empty' "$TEST_DIR/prd.json")
-    t2_blocked_by=$(jq -c '.tasks[1].blockedBy // empty' "$TEST_DIR/prd.json")
+    t1_status=$(jq -r '.tasks[0].status // empty' "$working_json")
+    t2_status=$(jq -r '.tasks[1].status // empty' "$working_json")
+    t2_blocked_by=$(jq -c '.tasks[1].blockedBy // empty' "$working_json")
+    rm -rf "$s"
 
     if [ "$t1_status" = "ready" ]; then pass "task-1 marked ready"
     else fail "task-1 status should be ready, got: $t1_status"; fi
@@ -108,8 +116,10 @@ test_cycle_blocks_run() {
 }
 EOF
 
-    local output exit_code
-    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    local s output exit_code
+    s=$(mktemp -d)
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    rm -rf "$s"
     if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "cycle"; then
         pass "cycle blocks run at validation time"
     else
@@ -130,8 +140,10 @@ test_self_dep_blocks_run() {
 }
 EOF
 
-    local output exit_code
-    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    local s output exit_code
+    s=$(mktemp -d)
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    rm -rf "$s"
     if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "self"; then
         pass "self-dep blocks run"
     else
@@ -158,8 +170,10 @@ EOF
 
     # Validation will reject the "ghost" reference. That's the correct behavior — unknown
     # refs are surfaced at validation, not at runtime. So we assert validation fails.
-    local output exit_code
-    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    local s output exit_code
+    s=$(mktemp -d)
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --dry-run --no-github 2>&1) && exit_code=0 || exit_code=$?
+    rm -rf "$s"
     if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "unknown dependency"; then
         pass "dangling dependency ref is surfaced at validation"
     else
