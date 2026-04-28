@@ -474,6 +474,38 @@ detect_legacy_state() {
     done
 }
 
+# Hard-error if legacy state exists for this PRD AND STATE_DIR is empty AND
+# neither --migrate-state nor --state-dir was passed. Prevents silent orphaning.
+enforce_no_legacy() {
+    if [ -n "$STATE_DIR_OVERRIDE" ] || [ "$MIGRATE_STATE" = true ]; then
+        return 0
+    fi
+
+    # If STATE_DIR already has any canonical file, the user is past migration.
+    if [ -f "$STATE_DIR/prd.json" ] || [ -f "$STATE_DIR/progress.txt" ]; then
+        return 0
+    fi
+
+    local legacy
+    legacy="$(detect_legacy_state)"
+    if [ -z "$legacy" ]; then
+        return 0
+    fi
+
+    local indented
+    indented="$(echo "$legacy" | sed 's/^/  - /')"
+
+    error_exit "Found legacy Ralph state for this PRD:
+$indented
+
+Ralph now stores state under .ralph/<slug>/." \
+"Pick one:
+  --migrate-state          Move legacy files into $STATE_DIR
+  --state-dir <path>       Keep using a custom location
+
+To start fresh and ignore the legacy files, delete or move them yourself."
+}
+
 # Convert markdown PRD to JSON format
 convert_prd_to_json() {
     # JSON_FILE is set by resolve_state_dir; honor that as the canonical path.
@@ -3086,6 +3118,7 @@ main() {
     parse_arguments "$@"
     validate_prd_file
     resolve_state_dir
+    enforce_no_legacy
 
     # If we get here, all validation passed
     if [ "$DEBUG" = true ]; then
