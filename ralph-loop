@@ -1562,6 +1562,7 @@ commit_iteration() {
         --pass-count "$pass_count"
         --total-count "$total_count"
         --status "$ralph_status"
+        --agent "$AGENT"
         --skip-if-empty
     )
     if [ -n "$issue_number" ]; then
@@ -1734,6 +1735,14 @@ crosscheck_issues() {
         echo -e "${YELLOW}[WARN] Found $warnings issue state inconsistencies. Local JSON is source of truth.${NC}"
     elif [ "$VERBOSE" = true ]; then
         echo -e "${BLUE}[INFO] Issue cross-check passed — all consistent${NC}"
+    fi
+
+    if [ "$RESUME" = true ] && [ -f "$PROGRESS_FILE" ]; then
+        local prev_agent
+        prev_agent=$(grep -E '^Agent: ' "$PROGRESS_FILE" | tail -n 1 | awk '{print $2}')
+        if [ -n "$prev_agent" ] && [ "$prev_agent" != "$AGENT" ]; then
+            echo -e "${YELLOW}[WARN] Previous run used agent '$prev_agent'; current run uses '$AGENT'. Continuing.${NC}"
+        fi
     fi
 }
 
@@ -2128,17 +2137,27 @@ Details: $details
 EOF
 }
 
+log_iteration_agent() {
+    local agent="$1"
+    cat >> "$PROGRESS_FILE" << EOF
+Agent: $agent
+EOF
+}
+
+log_iteration_reviewer() {
+    local agent="$1"
+    local status="$2"
+    cat >> "$PROGRESS_FILE" << EOF
+Reviewer: $agent $status
+EOF
+}
+
 log_iteration_mcp() {
     local mcp_status="$1"
 
     cat >> "$PROGRESS_FILE" << EOF
 MCP: $mcp_status
 EOF
-}
-
-# Stub overridden in Task 11.
-log_iteration_reviewer() {
-    :
 }
 
 # Log learnings to progress file
@@ -2567,6 +2586,7 @@ post_iteration_comment() {
         --max-iterations "$MAX_ITERATIONS" \
         --results "$results_json" \
         --criteria "$criteria_json" \
+        --agent "$AGENT" \
         "${mcp_args[@]}" 2>&1 || {
         echo -e "${YELLOW}[WARN] Failed to post comment to issue #$issue_number${NC}"
     }
@@ -2997,6 +3017,7 @@ Try again later or check Claude API status at https://status.anthropic.com"
             mcp_status="ok"
         fi
 
+        log_iteration_agent "$AGENT"
         log_iteration_mcp "$mcp_status"
 
         # Validate JSON wasn't corrupted by Claude
