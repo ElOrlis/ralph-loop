@@ -158,6 +158,46 @@ echo "=== State Paths Tests ==="
     cleanup "$DIR"
 }
 
+# Test 8: orphan warning when a sibling slug exists for the same basename
+{
+    DIR="$(setup_temp_repo)"
+    pushd "$DIR" >/dev/null
+    # Seed an orphan dir with the same basename but a different hash.
+    mkdir -p ".ralph/simple-feature-deadbeef"
+    echo "old/path/simple-feature.md" > ".ralph/simple-feature-deadbeef/.source"
+    OUTPUT="$("$RALPH" ./simple-feature.md --no-github --dry-run 2>&1 || true)"
+    if echo "$OUTPUT" | grep -q "possibly orphaned by a PRD move"; then
+        pass "orphan warning printed when sibling slug dir exists"
+    else
+        fail "orphan warning missing (output: $(echo "$OUTPUT" | head -3))"
+    fi
+    popd >/dev/null
+    cleanup "$DIR"
+}
+
+# Test 9: .json PRD input is copied into STATE_DIR and not mutated in place
+{
+    DIR="$(setup_temp_repo)"
+    pushd "$DIR" >/dev/null
+    cp "$EXAMPLE_JSON" ./feature.json
+    # capture the original source bytes
+    BEFORE_HASH="$(shasum ./feature.json | awk '{print $1}')"
+    "$RALPH" ./feature.json --no-github --dry-run >/dev/null 2>&1 || true
+    if compgen -G ".ralph/feature-*/prd.json" >/dev/null; then
+        pass ".json input copied into STATE_DIR"
+    else
+        fail ".json input was not copied into STATE_DIR"
+    fi
+    AFTER_HASH="$(shasum ./feature.json | awk '{print $1}')"
+    if [ "$BEFORE_HASH" = "$AFTER_HASH" ]; then
+        pass ".json input source file unmodified"
+    else
+        fail ".json input source file was mutated"
+    fi
+    popd >/dev/null
+    cleanup "$DIR"
+}
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -413,6 +413,24 @@ resolve_state_dir() {
         fi
     fi
 
+    # Orphan warning: if STATE_DIR doesn't exist yet, check for sibling dirs
+    # with the same basename (possibly orphaned by a PRD rename/move).
+    if [ -z "$STATE_DIR_OVERRIDE" ] && [ ! -d "$STATE_DIR" ]; then
+        local repo_root
+        repo_root="$(dirname "$(dirname "$STATE_DIR")")"
+        local prd_basename_noext
+        prd_basename_noext="$(basename "${PRD_FILE%.*}")"
+        if [ -d "${repo_root}/.ralph" ]; then
+            local sibling
+            for sibling in "${repo_root}/.ralph/${prd_basename_noext}"-*; do
+                [ -d "$sibling" ] || continue
+                # Skip if this sibling IS the STATE_DIR we're about to create.
+                [ "$sibling" = "$STATE_DIR" ] && continue
+                echo -e "${YELLOW}[WARN] Found .ralph/$(basename "$sibling")/ — possibly orphaned by a PRD move. Pass --state-dir ${repo_root}/.ralph/$(basename "$sibling") to reuse it.${NC}"
+            done
+        fi
+    fi
+
     mkdir -p "$STATE_DIR"
 
     if [ "$ralph_root_existed" = false ]; then
@@ -576,11 +594,17 @@ convert_prd_to_json() {
     # JSON_FILE is set by resolve_state_dir; honor that as the canonical path.
     local json_file="$JSON_FILE"
 
-    # If input is already JSON, just set JSON_FILE and return
+    # If input is already JSON, copy it into STATE_DIR (if not already there) and
+    # leave JSON_FILE pointing at $STATE_DIR/prd.json (set by resolve_state_dir).
+    # The user's source file becomes a read-only input.
     if [[ "$PRD_FILE" =~ \.json$ ]]; then
-        JSON_FILE="$PRD_FILE"
-        if [ "$VERBOSE" = true ]; then
-            echo -e "${BLUE}[INFO] Input is already JSON format: $JSON_FILE${NC}"
+        if [ ! -f "$JSON_FILE" ]; then
+            cp "$PRD_FILE" "$JSON_FILE"
+            if [ "$VERBOSE" = true ]; then
+                echo -e "${BLUE}[INFO] Copied $PRD_FILE → $JSON_FILE${NC}"
+            fi
+        elif [ "$VERBOSE" = true ]; then
+            echo -e "${BLUE}[INFO] Using existing working JSON: $JSON_FILE${NC}"
         fi
         return 0
     fi

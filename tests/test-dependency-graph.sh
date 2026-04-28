@@ -63,14 +63,15 @@ EOF
     s=$(mktemp -d)
     # --dry-run still exercises sync_blocked_statuses (it runs before find_next_task).
     "$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --dry-run --no-github >/dev/null 2>&1 || true
-    rm -rf "$s"
 
-    # When passing a JSON file directly, ralph-loop writes status updates back to the
-    # original JSON file (JSON_FILE = PRD_FILE for JSON inputs).
+    # Ralph copies .json input into STATE_DIR and writes all updates there;
+    # the original source file is left read-only. Read from the working copy.
+    local working_json="$s/prd.json"
     local t1_status t2_status t2_blocked_by
-    t1_status=$(jq -r '.tasks[0].status // empty' "$TEST_DIR/prd.json")
-    t2_status=$(jq -r '.tasks[1].status // empty' "$TEST_DIR/prd.json")
-    t2_blocked_by=$(jq -c '.tasks[1].blockedBy // empty' "$TEST_DIR/prd.json")
+    t1_status=$(jq -r '.tasks[0].status // empty' "$working_json")
+    t2_status=$(jq -r '.tasks[1].status // empty' "$working_json")
+    t2_blocked_by=$(jq -c '.tasks[1].blockedBy // empty' "$working_json")
+    rm -rf "$s"
 
     if [ "$t1_status" = "ready" ]; then pass "task-1 marked ready"
     else fail "task-1 status should be ready, got: $t1_status"; fi
