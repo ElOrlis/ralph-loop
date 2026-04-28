@@ -19,6 +19,9 @@ DRY_RUN=false
 GITHUB_ENABLED=true
 MCP_ENABLED=false
 MCP_CONFIG_FILE=""
+AGENT="claude"
+AGENT_EXPLICIT=false
+REVIEWER="none"
 STATE_DIR=""
 STATE_DIR_OVERRIDE=""
 MIGRATE_STATE=false
@@ -105,6 +108,14 @@ OPTIONS:
   --mcp                   Enable mcpls MCP server for Claude (opt-in).
                           Requires 'mcpls' on PATH. See:
                           https://github.com/bug-ops/mcpls
+  --agent <claude|copilot>
+                          Pick the agent backend for the iteration loop.
+                          Default: claude.
+  --reviewer <none|claude|copilot|auto>
+                          On criterion failure, run a second agent to
+                          suggest a different approach. 'auto' picks the
+                          opposite of --agent (or copilot if --agent is
+                          default). Default: none.
   --repo owner/name      Override target GitHub repository
                           (default: PRD "repository" field or git remote origin)
 
@@ -319,6 +330,26 @@ parse_arguments() {
             --mcp)
                 MCP_ENABLED=true
                 shift
+                ;;
+            --agent)
+                if [ -z "${2:-}" ]; then
+                    error_exit "--agent requires a value: claude or copilot" "Example: ./ralph-loop my-prd.md --agent copilot"
+                fi
+                case "$2" in
+                    claude|copilot) AGENT="$2"; AGENT_EXPLICIT=true ;;
+                    *) error_exit "--agent must be 'claude' or 'copilot' (got: $2)" "Run './ralph-loop --help' for options." ;;
+                esac
+                shift 2
+                ;;
+            --reviewer)
+                if [ -z "${2:-}" ]; then
+                    error_exit "--reviewer requires a value: none, claude, copilot, or auto" "Example: ./ralph-loop my-prd.md --reviewer auto"
+                fi
+                case "$2" in
+                    none|claude|copilot|auto) REVIEWER="$2" ;;
+                    *) error_exit "--reviewer must be one of: none, claude, copilot, auto (got: $2)" "Run './ralph-loop --help' for options." ;;
+                esac
+                shift 2
                 ;;
             --repo)
                 if [ -z "${2:-}" ]; then
@@ -2270,6 +2301,32 @@ update_task_attempts() {
     fi
 }
 
+# invoke_agent <agent> <prompt_file> <mcp_config_file>
+# Captures stdout+stderr into global $agent_output, returns the agent exit code.
+invoke_agent() {
+    local agent="$1"
+    local prompt_file="$2"
+    local mcp_config="$3"
+    local mcp_args=()
+    if [ -n "$mcp_config" ]; then
+        mcp_args+=(--mcp-config "$mcp_config")
+    fi
+    case "$agent" in
+        claude)
+            agent_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1)
+            return $?
+            ;;
+        copilot)
+            agent_output=$(copilot -p --allow-all-tools "${mcp_args[@]}" < "$prompt_file" 2>&1)
+            return $?
+            ;;
+        *)
+            agent_output="invoke_agent: unsupported agent: $agent"
+            return 2
+            ;;
+    esac
+}
+
 # Check for thrash: criterion failing 4+ consecutive times with no progress
 check_thrash() {
     local task_id="$1"
@@ -2763,6 +2820,8 @@ run_ralph_loop() {
         if [ "$MCP_ENABLED" = true ] && [ -n "$MCP_CONFIG_FILE" ]; then
             mcp_args+=(--mcp-config "$MCP_CONFIG_FILE")
         fi
+        local primary_mcp=""
+        if [ "$MCP_ENABLED" = true ]; then primary_mcp="$MCP_CONFIG_FILE"; fi
 
         # Retry loop for API calls
         while [ $retry_count -lt $max_retries ] && [ "$api_success" = false ]; do
@@ -2782,7 +2841,8 @@ run_ralph_loop() {
                     echo ""
                 fi
                 echo -e "${BLUE}[DEBUG] Calling Claude API...${NC}"
-                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
+                if invoke_agent "$AGENT" "$prompt_file" "$primary_mcp"; then
+                    claude_output="$agent_output"
                     api_success=true
                     echo ""
                     echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -2795,6 +2855,7 @@ run_ralph_loop() {
                     echo ""
                 else
                     claude_exit_code=$?
+                    claude_output="$agent_output"
                 fi
             elif [ "$VERBOSE" = true ]; then
                 if [ $retry_count -eq 0 ]; then
@@ -2805,17 +2866,21 @@ run_ralph_loop() {
                     echo ""
                 fi
                 echo -e "${BLUE}[VERBOSE] Calling Claude API...${NC}"
-                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
+                if invoke_agent "$AGENT" "$prompt_file" "$primary_mcp"; then
+                    claude_output="$agent_output"
                     api_success=true
                     echo -e "${GREEN}[VERBOSE] Claude API call completed${NC}"
                 else
                     claude_exit_code=$?
+                    claude_output="$agent_output"
                 fi
             else
-                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
+                if invoke_agent "$AGENT" "$prompt_file" "$primary_mcp"; then
+                    claude_output="$agent_output"
                     api_success=true
                 else
                     claude_exit_code=$?
+                    claude_output="$agent_output"
                 fi
             fi
 
@@ -3205,6 +3270,26 @@ Try again later or check Claude API status at https://status.anthropic.com"
 # Main entry point
 main() {
     parse_arguments "$@"
+
+    # Resolve --reviewer auto
+    if [ "$REVIEWER" = "auto" ]; then
+        if [ "$AGENT_EXPLICIT" = true ]; then
+            if [ "$AGENT" = "claude" ]; then REVIEWER="copilot"; else REVIEWER="claude"; fi
+        else
+            REVIEWER="copilot"
+        fi
+    fi
+
+    # Preflight: required binaries on PATH
+    if ! command -v "$AGENT" >/dev/null 2>&1; then
+        error_exit "Agent binary '$AGENT' not found on PATH" "Install it or pick a different --agent value."
+    fi
+    if [ "$REVIEWER" != "none" ] && [ "$REVIEWER" != "$AGENT" ]; then
+        if ! command -v "$REVIEWER" >/dev/null 2>&1; then
+            error_exit "Reviewer binary '$REVIEWER' not found on PATH" "Install it or pick a different --reviewer value."
+        fi
+    fi
+
     validate_prd_file
     resolve_state_dir
     enforce_no_legacy
