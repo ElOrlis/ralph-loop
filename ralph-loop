@@ -3164,7 +3164,7 @@ Try again later or check Claude API status at https://status.anthropic.com"
                     local reviewer_prompt_file="${STATE_DIR}/reviewer-prompt-${iteration}.txt"
                     local reviewer_feedback_file="${STATE_DIR}/reviewer-feedback.txt"
 
-                    echo "$verify_result" > "$reviewer_results_file"
+                    echo "$verify_result" | jq -c '.results' > "$reviewer_results_file"
                     echo "$claude_output" | tail -n 80 > "$reviewer_tail_file"
 
                     if ! node "$SCRIPT_DIR/lib/prompt/index.js" build-review \
