@@ -1701,6 +1701,15 @@ mark_pr_ready() {
 
 # On resume, cross-check task issue states for consistency
 crosscheck_issues() {
+    # Agent mismatch warning runs regardless of GitHub state.
+    if [ "$RESUME" = true ] && [ -f "$PROGRESS_FILE" ]; then
+        local prev_agent
+        prev_agent=$(grep -E '^Agent: ' "$PROGRESS_FILE" | tail -n 1 | awk '{print $2}')
+        if [ -n "$prev_agent" ] && [ "$prev_agent" != "$AGENT" ]; then
+            echo -e "${YELLOW}[WARN] Previous run used agent '$prev_agent'; current run uses '$AGENT'. Continuing.${NC}"
+        fi
+    fi
+
     if [ "$GITHUB_ENABLED" = false ]; then
         return 0
     fi
@@ -1735,14 +1744,6 @@ crosscheck_issues() {
         echo -e "${YELLOW}[WARN] Found $warnings issue state inconsistencies. Local JSON is source of truth.${NC}"
     elif [ "$VERBOSE" = true ]; then
         echo -e "${BLUE}[INFO] Issue cross-check passed — all consistent${NC}"
-    fi
-
-    if [ "$RESUME" = true ] && [ -f "$PROGRESS_FILE" ]; then
-        local prev_agent
-        prev_agent=$(grep -E '^Agent: ' "$PROGRESS_FILE" | tail -n 1 | awk '{print $2}')
-        if [ -n "$prev_agent" ] && [ "$prev_agent" != "$AGENT" ]; then
-            echo -e "${YELLOW}[WARN] Previous run used agent '$prev_agent'; current run uses '$AGENT'. Continuing.${NC}"
-        fi
     fi
 }
 
@@ -3108,6 +3109,8 @@ Try again later or check Claude API status at https://status.anthropic.com"
             echo "$updated_prd" | jq '.' > "$JSON_FILE"
 
             log_iteration_result "$iteration" "$next_task_id" "PASSED" "All criteria verified"
+            # Reviewer n/a: all criteria passed, no reviewer call needed.
+            log_iteration_reviewer "$REVIEWER" "n/a"
 
             # Post iteration comment to GitHub issue
             post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result" "$mcp_status"
