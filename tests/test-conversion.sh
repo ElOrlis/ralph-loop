@@ -12,6 +12,10 @@ NC='\033[0m'
 TESTS_PASSED=0
 TESTS_FAILED=0
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+RALPH_LOOP="$PROJECT_ROOT/ralph-loop"
+
 # Helper functions
 pass() {
     echo -e "${GREEN}✓ PASS:${NC} $1"
@@ -46,6 +50,11 @@ test_file_type_detection() {
     echo ""
     echo "Test 1: File type detection"
 
+    local state1 state2
+    state1=$(mktemp -d)
+    state2=$(mktemp -d)
+    trap "rm -rf '$state1' '$state2'" RETURN
+
     # Create test markdown file
     cat > "$TEST_DIR/test.md" << 'EOF'
 ## Task: Test Task
@@ -57,19 +66,20 @@ test_file_type_detection() {
 EOF
 
     # Run with markdown file
-    ../ralph-loop "$TEST_DIR/test.md" > "$TEST_DIR/output1.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/test.md" --state-dir "$state1" --dry-run --no-github > "$TEST_DIR/output1.txt" 2>&1 || true
 
-    if [ -f "$TEST_DIR/test.json" ]; then
+    if [ -f "$state1/prd.json" ]; then
         pass "Markdown file detected and converted to JSON"
     else
         fail "Markdown file was not converted to JSON"
     fi
 
     # Run with JSON file - should not create another file
-    json_mtime_before=$(stat -f %m "$TEST_DIR/test.json" 2>/dev/null || echo "0")
+    local json_mtime_before json_mtime_after
+    json_mtime_before=$(stat -f %m "$state1/prd.json" 2>/dev/null || echo "0")
     sleep 1
-    ../ralph-loop "$TEST_DIR/test.json" --verbose > "$TEST_DIR/output2.txt" 2>&1 || true
-    json_mtime_after=$(stat -f %m "$TEST_DIR/test.json" 2>/dev/null || echo "0")
+    "$RALPH_LOOP" "$state1/prd.json" --state-dir "$state2" --verbose > "$TEST_DIR/output2.txt" 2>&1 || true
+    json_mtime_after=$(stat -f %m "$state1/prd.json" 2>/dev/null || echo "0")
 
     if grep -q "Input is already JSON format" "$TEST_DIR/output2.txt" || \
        [ "$json_mtime_before" = "$json_mtime_after" ]; then
@@ -83,6 +93,10 @@ EOF
 test_markdown_parsing() {
     echo ""
     echo "Test 2: Markdown parsing"
+
+    local state
+    state=$(mktemp -d)
+    trap "rm -rf '$state'" RETURN
 
     cat > "$TEST_DIR/parse-test.md" << 'EOF'
 ## Task: First Task
@@ -103,11 +117,11 @@ Description text here.
 - Another criterion
 EOF
 
-    ../ralph-loop "$TEST_DIR/parse-test.md" > /dev/null 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/parse-test.md" --state-dir "$state" --dry-run --no-github > /dev/null 2>&1 || true
 
-    if [ -f "$TEST_DIR/parse-test.json" ]; then
+    if [ -f "$state/prd.json" ]; then
         # Check if JSON has 2 tasks
-        task_count=$(grep -o '"id": "task-' "$TEST_DIR/parse-test.json" | wc -l | tr -d ' ')
+        task_count=$(grep -o '"id": "task-' "$state/prd.json" | wc -l | tr -d ' ')
         if [ "$task_count" -eq 2 ]; then
             pass "Parsed correct number of tasks (2)"
         else
@@ -115,25 +129,25 @@ EOF
         fi
 
         # Check if categories are extracted
-        if grep -q '"category": "Backend"' "$TEST_DIR/parse-test.json" && \
-           grep -q '"category": "Frontend"' "$TEST_DIR/parse-test.json"; then
+        if grep -q '"category": "Backend"' "$state/prd.json" && \
+           grep -q '"category": "Frontend"' "$state/prd.json"; then
             pass "Categories extracted correctly"
         else
             fail "Categories not extracted correctly"
         fi
 
         # Check if priorities are extracted
-        if grep -q '"priority": 1' "$TEST_DIR/parse-test.json" && \
-           grep -q '"priority": 2' "$TEST_DIR/parse-test.json"; then
+        if grep -q '"priority": 1' "$state/prd.json" && \
+           grep -q '"priority": 2' "$state/prd.json"; then
             pass "Priorities extracted correctly"
         else
             fail "Priorities not extracted correctly"
         fi
 
         # Check if acceptance criteria are parsed
-        if grep -q '"First criterion"' "$TEST_DIR/parse-test.json" && \
-           grep -q '"Second criterion"' "$TEST_DIR/parse-test.json" && \
-           grep -q '"Another criterion"' "$TEST_DIR/parse-test.json"; then
+        if grep -q '"First criterion"' "$state/prd.json" && \
+           grep -q '"Second criterion"' "$state/prd.json" && \
+           grep -q '"Another criterion"' "$state/prd.json"; then
             pass "Acceptance criteria parsed correctly"
         else
             fail "Acceptance criteria not parsed correctly"
@@ -147,6 +161,10 @@ EOF
 test_task_ids() {
     echo ""
     echo "Test 3: Task ID generation"
+
+    local state
+    state=$(mktemp -d)
+    trap "rm -rf '$state'" RETURN
 
     cat > "$TEST_DIR/ids-test.md" << 'EOF'
 ## Task: Task One
@@ -168,12 +186,12 @@ test_task_ids() {
 - Criterion
 EOF
 
-    ../ralph-loop "$TEST_DIR/ids-test.md" > /dev/null 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/ids-test.md" --state-dir "$state" --dry-run --no-github > /dev/null 2>&1 || true
 
-    if [ -f "$TEST_DIR/ids-test.json" ]; then
-        if grep -q '"id": "task-1"' "$TEST_DIR/ids-test.json" && \
-           grep -q '"id": "task-2"' "$TEST_DIR/ids-test.json" && \
-           grep -q '"id": "task-3"' "$TEST_DIR/ids-test.json"; then
+    if [ -f "$state/prd.json" ]; then
+        if grep -q '"id": "task-1"' "$state/prd.json" && \
+           grep -q '"id": "task-2"' "$state/prd.json" && \
+           grep -q '"id": "task-3"' "$state/prd.json"; then
             pass "Unique task IDs generated (task-1, task-2, task-3)"
         else
             fail "Task IDs not generated correctly"
@@ -188,6 +206,10 @@ test_task_initialization() {
     echo ""
     echo "Test 4: Task field initialization"
 
+    local state
+    state=$(mktemp -d)
+    trap "rm -rf '$state'" RETURN
+
     cat > "$TEST_DIR/init-test.md" << 'EOF'
 ## Task: Test Task
 **Category**: Test
@@ -197,22 +219,22 @@ test_task_initialization() {
 - Criterion
 EOF
 
-    ../ralph-loop "$TEST_DIR/init-test.md" > /dev/null 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/init-test.md" --state-dir "$state" --dry-run --no-github > /dev/null 2>&1 || true
 
-    if [ -f "$TEST_DIR/init-test.json" ]; then
-        if grep -q '"passes": false' "$TEST_DIR/init-test.json"; then
+    if [ -f "$state/prd.json" ]; then
+        if grep -q '"passes": false' "$state/prd.json"; then
             pass "passes field initialized to false"
         else
             fail "passes field not initialized correctly"
         fi
 
-        if grep -q '"attempts": 0' "$TEST_DIR/init-test.json"; then
+        if grep -q '"attempts": 0' "$state/prd.json"; then
             pass "attempts field initialized to 0"
         else
             fail "attempts field not initialized correctly"
         fi
 
-        if grep -q '"completedAt": null' "$TEST_DIR/init-test.json"; then
+        if grep -q '"completedAt": null' "$state/prd.json"; then
             pass "completedAt field initialized to null"
         else
             fail "completedAt field not initialized correctly"
@@ -227,6 +249,10 @@ test_preserve_markdown() {
     echo ""
     echo "Test 5: Preserve original markdown"
 
+    local state
+    state=$(mktemp -d)
+    trap "rm -rf '$state'" RETURN
+
     cat > "$TEST_DIR/preserve-test.md" << 'EOF'
 ## Task: Test
 **Priority**: 1
@@ -237,7 +263,7 @@ EOF
 
     cp "$TEST_DIR/preserve-test.md" "$TEST_DIR/preserve-test-backup.md"
 
-    ../ralph-loop "$TEST_DIR/preserve-test.md" > /dev/null 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/preserve-test.md" --state-dir "$state" --dry-run --no-github > /dev/null 2>&1 || true
 
     if diff -q "$TEST_DIR/preserve-test.md" "$TEST_DIR/preserve-test-backup.md" > /dev/null; then
         pass "Original markdown file preserved unchanged"
@@ -251,6 +277,10 @@ test_use_existing_json() {
     echo ""
     echo "Test 6: Use existing JSON"
 
+    local state
+    state=$(mktemp -d)
+    trap "rm -rf '$state'" RETURN
+
     cat > "$TEST_DIR/existing-test.md" << 'EOF'
 ## Task: Test
 **Priority**: 1
@@ -260,18 +290,18 @@ test_use_existing_json() {
 EOF
 
     # First conversion
-    ../ralph-loop "$TEST_DIR/existing-test.md" > /dev/null 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/existing-test.md" --state-dir "$state" --dry-run --no-github > /dev/null 2>&1 || true
 
     # Modify the JSON
-    if [ -f "$TEST_DIR/existing-test.json" ]; then
+    if [ -f "$state/prd.json" ]; then
         # Add a marker to the JSON
-        sed -i.bak 's/"Converted PRD"/"Modified JSON"/' "$TEST_DIR/existing-test.json"
+        sed -i.bak 's/"Converted PRD"/"Modified JSON"/' "$state/prd.json"
 
-        # Run again
-        ../ralph-loop "$TEST_DIR/existing-test.md" > /dev/null 2>&1 || true
+        # Run again — ralph-loop will use the existing JSON in the state dir
+        "$RALPH_LOOP" "$TEST_DIR/existing-test.md" --state-dir "$state" --dry-run --no-github > /dev/null 2>&1 || true
 
         # Check if the modification is still there
-        if grep -q '"Modified JSON"' "$TEST_DIR/existing-test.json"; then
+        if grep -q '"Modified JSON"' "$state/prd.json"; then
             pass "Existing JSON used instead of reconverting"
         else
             fail "Existing JSON was overwritten"
@@ -286,6 +316,10 @@ test_required_fields() {
     echo ""
     echo "Test 7: Required fields present"
 
+    local state
+    state=$(mktemp -d)
+    trap "rm -rf '$state'" RETURN
+
     cat > "$TEST_DIR/fields-test.md" << 'EOF'
 ## Task: Complete Task
 **Category**: Testing
@@ -298,13 +332,13 @@ Task description here.
 - Second criterion
 EOF
 
-    ../ralph-loop "$TEST_DIR/fields-test.md" > /dev/null 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/fields-test.md" --state-dir "$state" --dry-run --no-github > /dev/null 2>&1 || true
 
-    if [ -f "$TEST_DIR/fields-test.json" ]; then
+    if [ -f "$state/prd.json" ]; then
         local all_present=true
 
         for field in "id" "title" "category" "priority" "description" "acceptanceCriteria" "passes" "completedAt" "attempts"; do
-            if ! grep -q "\"$field\":" "$TEST_DIR/fields-test.json"; then
+            if ! grep -q "\"$field\":" "$state/prd.json"; then
                 fail "Required field '$field' missing"
                 all_present=false
             fi
@@ -322,6 +356,10 @@ EOF
 test_parses_depends_on_line() {
     echo ""
     echo "Test 8: Parse **Depends On**: line into dependsOn array"
+
+    local state
+    state=$(mktemp -d)
+    trap "rm -rf '$state'" RETURN
 
     cat > "$TEST_DIR/prd.md" << 'EOF'
 # Test PRD
@@ -357,9 +395,9 @@ Stub.
 EOF
 
     # --dry-run converts markdown, validates, builds a prompt, then exits — no Claude call.
-    ../ralph-loop "$TEST_DIR/prd.md" --dry-run --no-github >/dev/null 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/prd.md" --state-dir "$state" --dry-run --no-github >/dev/null 2>&1 || true
 
-    local json_file="$TEST_DIR/prd.json"
+    local json_file="$state/prd.json"
     if [ ! -f "$json_file" ]; then fail "expected generated $json_file"; return; fi
 
     local t1_deps t2_deps t3_deps

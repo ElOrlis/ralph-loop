@@ -51,6 +51,9 @@ test_analyze_flag() {
     echo ""
     echo "Test 1: --analyze-prd flag triggers analysis"
 
+    local s
+    s=$(mktemp -d)
+
     cat > "$TEST_DIR/analyze-test.json" << 'EOF'
 {
   "title": "Test PRD",
@@ -68,19 +71,24 @@ test_analyze_flag() {
 }
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/analyze-test.json" --analyze-prd > "$TEST_DIR/analyze-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/analyze-test.json" --state-dir "$s" --analyze-prd > "$TEST_DIR/analyze-output.txt" 2>&1 || true
 
     if grep -qi "analy" "$TEST_DIR/analyze-output.txt"; then
         pass "--analyze-prd flag triggers analysis"
     else
         fail "--analyze-prd flag does not trigger analysis"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 2: Runs validation checks first
 test_validation_first() {
     echo ""
     echo "Test 2: Runs validation before analysis"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/invalid-for-analysis.json" << 'EOF'
 {
@@ -89,19 +97,24 @@ test_validation_first() {
 }
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/invalid-for-analysis.json" --analyze-prd > "$TEST_DIR/validation-first.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/invalid-for-analysis.json" --state-dir "$s" --analyze-prd > "$TEST_DIR/validation-first.txt" 2>&1 || true
 
     if grep -qi "validation\|error\|invalid" "$TEST_DIR/validation-first.txt"; then
         pass "Validation runs before analysis"
     else
         fail "Validation does not run before analysis"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 3: Shows statistics (task count, categories, criteria distribution)
 test_statistics() {
     echo ""
     echo "Test 3: Shows PRD statistics"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/stats-test.json" << 'EOF'
 {
@@ -129,7 +142,7 @@ test_statistics() {
 }
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/stats-test.json" --analyze-prd > "$TEST_DIR/stats-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/stats-test.json" --state-dir "$s" --analyze-prd > "$TEST_DIR/stats-output.txt" 2>&1 || true
 
     local has_stats=0
 
@@ -146,12 +159,17 @@ EOF
     else
         fail "Analysis missing statistics"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 4: Provides task-by-task feedback
 test_task_feedback() {
     echo ""
     echo "Test 4: Provides task-by-task feedback"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/feedback-test.json" << 'EOF'
 {
@@ -186,19 +204,24 @@ test_task_feedback() {
 }
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/feedback-test.json" --analyze-prd > "$TEST_DIR/feedback-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/feedback-test.json" --state-dir "$s" --analyze-prd > "$TEST_DIR/feedback-output.txt" 2>&1 || true
 
     if grep -qi "task-1\|task-2\|first task\|second task" "$TEST_DIR/feedback-output.txt"; then
         pass "Analysis provides per-task feedback"
     else
         fail "Analysis missing per-task feedback"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 5: Exits after analysis without starting loop
 test_exits_after_analysis() {
     echo ""
     echo "Test 5: Exits after analysis without starting loop"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/exit-test.json" << 'EOF'
 {
@@ -217,7 +240,7 @@ test_exits_after_analysis() {
 }
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/exit-test.json" --analyze-prd > "$TEST_DIR/exit-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/exit-test.json" --state-dir "$s" --analyze-prd > "$TEST_DIR/exit-output.txt" 2>&1 || true
 
     # Should not contain iteration-related output
     if ! grep -qi "iteration.*1\|starting.*loop\|calling.*claude" "$TEST_DIR/exit-output.txt"; then
@@ -226,18 +249,23 @@ EOF
         fail "Analysis started the loop instead of exiting"
     fi
 
-    # Should not create progress.txt
-    if [ ! -f "$TEST_DIR/progress.txt" ]; then
+    # Should not create progress.txt in state dir
+    if [ ! -f "$s/progress.txt" ]; then
         pass "No progress file created during analysis"
     else
         fail "Progress file created during analysis"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 6: Suggests improvements for vague criteria
 test_improvement_suggestions() {
     echo ""
     echo "Test 6: Suggests improvements for vague PRD"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/vague-test.json" << 'EOF'
 {
@@ -260,19 +288,24 @@ test_improvement_suggestions() {
 }
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/vague-test.json" --analyze-prd > "$TEST_DIR/vague-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/vague-test.json" --state-dir "$s" --analyze-prd > "$TEST_DIR/vague-output.txt" 2>&1 || true
 
     if grep -qi "vague\|specific\|improve\|suggest\|clarif\|more detail" "$TEST_DIR/vague-output.txt"; then
         pass "Analysis suggests improvements for vague criteria"
     else
         fail "Analysis does not suggest improvements"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 7: Shows overall recommendations at the end
 test_overall_recommendations() {
     echo ""
     echo "Test 7: Shows overall recommendations"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/recommendations-test.json" << 'EOF'
 {
@@ -291,19 +324,24 @@ test_overall_recommendations() {
 }
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/recommendations-test.json" --analyze-prd > "$TEST_DIR/recommendations-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/recommendations-test.json" --state-dir "$s" --analyze-prd > "$TEST_DIR/recommendations-output.txt" 2>&1 || true
 
     if grep -qi "recommend\|overall\|summar\|conclusion" "$TEST_DIR/recommendations-output.txt"; then
         pass "Analysis includes overall recommendations"
     else
         fail "Analysis missing overall recommendations"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 8: Works with well-written PRD
 test_well_written_prd() {
     echo ""
     echo "Test 8: Analyzes well-written PRD"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/good-prd.json" << 'EOF'
 {
@@ -328,19 +366,24 @@ test_well_written_prd() {
 }
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/good-prd.json" --analyze-prd > "$TEST_DIR/good-output.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/good-prd.json" --state-dir "$s" --analyze-prd > "$TEST_DIR/good-output.txt" 2>&1 || true
 
     if [ -s "$TEST_DIR/good-output.txt" ]; then
         pass "Analysis works with well-written PRD"
     else
         fail "Analysis failed with well-written PRD"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 9: Handles markdown conversion before analysis
 test_markdown_analysis() {
     echo ""
     echo "Test 9: Analyzes markdown PRD file"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/markdown-test.md" << 'EOF'
 ## Task: Test Task
@@ -354,7 +397,7 @@ Description here.
 - Second criterion
 EOF
 
-    "$RALPH_LOOP" "$TEST_DIR/markdown-test.md" --analyze-prd > "$TEST_DIR/markdown-analysis.txt" 2>&1 || true
+    "$RALPH_LOOP" "$TEST_DIR/markdown-test.md" --state-dir "$s" --analyze-prd > "$TEST_DIR/markdown-analysis.txt" 2>&1 || true
 
     if grep -qi "analy" "$TEST_DIR/markdown-analysis.txt"; then
         pass "Analysis works with markdown files"
@@ -362,18 +405,23 @@ EOF
         fail "Analysis failed with markdown file"
     fi
 
-    # Should have created JSON file
-    if [ -f "$TEST_DIR/markdown-test.json" ]; then
+    # Should have created JSON file in the state dir
+    if [ -f "$s/prd.json" ]; then
         pass "Markdown converted to JSON before analysis"
     else
         fail "Markdown not converted to JSON"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 10: Reports dependency statistics (ready / blocked counts)
 test_analyze_prd_reports_dependency_stats() {
     echo ""
     echo "Test 10: --analyze-prd prints ready / blocked counts"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/prd.json" << 'EOF'
 {
@@ -389,7 +437,7 @@ test_analyze_prd_reports_dependency_stats() {
 EOF
 
     local output
-    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --analyze-prd --no-github 2>&1 | head -80)
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --analyze-prd --no-github 2>&1 | head -80)
     if echo "$output" | grep -qi "Dependency"; then
         pass "prints Dependency section"
     else
@@ -401,12 +449,17 @@ EOF
     else
         fail "expected 'Blocked' count in output. Got:\n$output"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 11: Surfaces cycle errors in analysis output
 test_analyze_prd_reports_cycle_warning() {
     echo ""
     echo "Test 11: --analyze-prd surfaces cycle errors"
+
+    local s
+    s=$(mktemp -d)
 
     cat > "$TEST_DIR/prd.json" << 'EOF'
 {
@@ -421,12 +474,14 @@ test_analyze_prd_reports_cycle_warning() {
 EOF
 
     local output exit_code
-    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --analyze-prd --no-github 2>&1) && exit_code=0 || exit_code=$?
+    output=$("$RALPH_LOOP" "$TEST_DIR/prd.json" --state-dir "$s" --analyze-prd --no-github 2>&1) && exit_code=0 || exit_code=$?
     if [ "$exit_code" -ne 0 ] && echo "$output" | grep -qi "cycle"; then
         pass "surfaces cycle error and exits non-zero"
     else
         fail "expected non-zero exit + cycle message. Exit: $exit_code, Output:\n$output"
     fi
+
+    rm -rf "$s"
 }
 
 # Test 12: Suggested Type Hints section in analyze-prd output
@@ -464,7 +519,7 @@ STUB
     chmod +x "$stub_dir/claude"
 
     local output
-    output=$(PATH="$stub_dir:$PATH" "$RALPH_LOOP" "$sandbox/prd.json" --analyze-prd --no-github 2>&1 || true)
+    output=$(PATH="$stub_dir:$PATH" "$RALPH_LOOP" "$sandbox/prd.json" --state-dir "$sandbox" --analyze-prd --no-github 2>&1 || true)
 
     if echo "$output" | grep -q "Suggested Type Hints"; then
         pass "analyze-prd includes Suggested Type Hints section"

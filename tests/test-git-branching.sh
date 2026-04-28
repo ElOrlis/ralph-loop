@@ -116,8 +116,10 @@ test_no_branch_end_to_end() {
 }
 EOF
     : > "$MOCK_GIT_CALL_LOG"
-    local output exit_code
-    output=$("$PROJECT_ROOT/ralph-loop" "$TEST_DIR/prd.json" --no-branch --dry-run 2>&1) && exit_code=0 || exit_code=$?
+    local s output exit_code
+    s=$(mktemp -d)
+    output=$("$PROJECT_ROOT/ralph-loop" "$TEST_DIR/prd.json" --state-dir "$s" --no-branch --dry-run 2>&1) && exit_code=0 || exit_code=$?
+    rm -rf "$s"
     if [ $exit_code -eq 0 ]; then
         pass "--no-branch + --dry-run exits 0"
     else

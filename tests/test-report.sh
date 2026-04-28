@@ -38,6 +38,8 @@ make_sandbox() {
 
 write_fixture() {
     # write_fixture <sandbox>
+    # Puts prd.json and progress.txt in the sandbox dir, which is also used
+    # as --state-dir so ralph-loop finds them at the expected paths.
     cat > "$1/prd.json" <<'EOF'
 {
   "title": "Test PRD",
@@ -90,7 +92,7 @@ sandbox=$(make_sandbox)
 write_fixture "$sandbox"
 
 set +e
-output=$("$RALPH_LOOP" "$sandbox/prd.json" --report --no-github 2>&1)
+output=$("$RALPH_LOOP" "$sandbox/prd.json" --state-dir "$sandbox" --report --no-github 2>&1)
 exit_code=$?
 set -e
 
@@ -119,7 +121,7 @@ fi
 # ---------------------------------------------------------------
 info "Test: --report and --analyze-prd are mutually exclusive"
 set +e
-err=$("$RALPH_LOOP" "$sandbox/prd.json" --report --analyze-prd --no-github 2>&1)
+err=$("$RALPH_LOOP" "$sandbox/prd.json" --state-dir "$sandbox" --report --analyze-prd --no-github 2>&1)
 set -e
 if echo "$err" | grep -qi "mutually exclusive\|cannot be used together\|conflict"; then
     pass "--report + --analyze-prd produces conflict error"
@@ -143,7 +145,7 @@ STUB
 chmod +x "$stub_dir/gh"
 
 set +e
-output=$(PATH="$stub_dir:$PATH" "$RALPH_LOOP" "$sandbox/prd.json" --report 2>&1)
+output=$(PATH="$stub_dir:$PATH" "$RALPH_LOOP" "$sandbox/prd.json" --state-dir "$sandbox" --report 2>&1)
 exit_code=$?
 set -e
 

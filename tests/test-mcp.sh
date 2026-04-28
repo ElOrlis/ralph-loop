@@ -86,7 +86,7 @@ for _dir in "${_path_parts[@]}"; do
     _filtered_path="$_filtered_path:$_dir"
 done
 
-output=$(PATH="$_filtered_path" "$RALPH_LOOP" "$prd" --mcp --max-iterations 1 --no-github 2>&1 || true)
+output=$(PATH="$_filtered_path" "$RALPH_LOOP" "$prd" --state-dir "$sandbox" --mcp --max-iterations 1 --no-github 2>&1 || true)
 
 if echo "$output" | grep -qi "mcpls.*not.*found\|mcpls.*PATH\|install.*mcpls"; then
     pass "preflight aborts with mcpls-not-found message"
@@ -134,7 +134,7 @@ write_stub "$sandbox" mcpls 'exit 0'
 write_stub "$sandbox" claude "printf '%s\n' \"\$@\" > \"$record\"; echo DONE; exit 0"
 
 _isolated=$(make_isolated_path "$sandbox" mcpls claude)
-PATH="$_isolated" "$RALPH_LOOP" "$prd" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+PATH="$_isolated" "$RALPH_LOOP" "$prd" --state-dir "$sandbox" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
 
 if [ -f "$record" ] && grep -q -- "--mcp-config" "$record"; then
     pass "claude was invoked with --mcp-config"
@@ -163,7 +163,7 @@ record="$sandbox/claude-argv.txt"
 write_stub "$sandbox" claude "printf '%s\n' \"\$@\" > \"$record\"; echo DONE; exit 0"
 
 _isolated=$(make_isolated_path "$sandbox" claude)
-PATH="$_isolated" "$RALPH_LOOP" "$prd" --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+PATH="$_isolated" "$RALPH_LOOP" "$prd" --state-dir "$sandbox" --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
 
 if [ -f "$record" ] && ! grep -q -- "--mcp-config" "$record"; then
     pass "claude was invoked WITHOUT --mcp-config when --mcp is off"
@@ -183,7 +183,7 @@ write_stub "$sandbox" mcpls 'exit 0'
 write_stub "$sandbox" claude 'echo DONE; exit 0'
 
 isolated=$(make_isolated_path "$sandbox" mcpls claude)
-PATH="$isolated" "$RALPH_LOOP" "$prd" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+PATH="$isolated" "$RALPH_LOOP" "$prd" --state-dir "$sandbox" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
 
 if grep -q "MCP: ok" "$sandbox/progress.txt" 2>/dev/null; then
     pass "progress.txt shows 'MCP: ok' on healthy --mcp run"
@@ -200,7 +200,7 @@ write_stub "$sandbox" mcpls 'exit 0'
 write_stub "$sandbox" claude 'echo "mcpls server crashed" >&2; echo DONE; exit 0'
 
 isolated=$(make_isolated_path "$sandbox" mcpls claude)
-PATH="$isolated" "$RALPH_LOOP" "$prd" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+PATH="$isolated" "$RALPH_LOOP" "$prd" --state-dir "$sandbox" --mcp --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
 
 if grep -q "MCP: degraded" "$sandbox/progress.txt" 2>/dev/null; then
     pass "progress.txt shows 'MCP: degraded' when claude stderr mentions mcpls"
@@ -222,7 +222,7 @@ minimal_prd "$prd"
 write_stub "$sandbox" claude 'echo DONE; exit 0'
 
 isolated=$(make_isolated_path "$sandbox" mcpls claude)
-PATH="$isolated" "$RALPH_LOOP" "$prd" --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
+PATH="$isolated" "$RALPH_LOOP" "$prd" --state-dir "$sandbox" --max-iterations 1 --no-github > "$sandbox/run.log" 2>&1 || true
 
 if grep -q "MCP: off" "$sandbox/progress.txt" 2>/dev/null; then
     pass "progress.txt shows 'MCP: off' when --mcp is not set"
