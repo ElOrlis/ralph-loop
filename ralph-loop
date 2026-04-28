@@ -19,6 +19,10 @@ DRY_RUN=false
 GITHUB_ENABLED=true
 MCP_ENABLED=false
 MCP_CONFIG_FILE=""
+STATE_DIR=""
+STATE_DIR_OVERRIDE=""
+MIGRATE_STATE=false
+SOURCE_REL_PATH=""
 REPO_OVERRIDE=""
 TARGET_REPO=""
 GITHUB_API_CALLS=0
@@ -87,6 +91,11 @@ OPTIONS:
                           (iteration counts, per-task breakdown,
                           criteria hotspots, MCP health). Read-only,
                           offline. Mutually exclusive with --analyze-prd.
+  --state-dir <path>      Override the .ralph/<slug>/ state directory.
+                          Skips repo-root + slug resolution. Works outside
+                          a git repo.
+  --migrate-state         Move legacy state (sibling JSON, cwd progress.txt)
+                          into .ralph/<slug>/ before running. One-shot.
   --help                  Show this help message
   --dry-run               Show next prompt and exit (don't call Claude)
   --no-github             Disable all GitHub integration
@@ -315,6 +324,17 @@ parse_arguments() {
                 fi
                 REPO_OVERRIDE="$2"
                 shift 2
+                ;;
+            --state-dir)
+                if [ -z "${2:-}" ]; then
+                    error_exit "--state-dir requires a path argument" "Example: ./ralph-loop my-prd.md --state-dir /tmp/ralph-state"
+                fi
+                STATE_DIR_OVERRIDE="$2"
+                shift 2
+                ;;
+            --migrate-state)
+                MIGRATE_STATE=true
+                shift
                 ;;
             -*)
                 error_exit "Unknown option: $1" "Run './ralph-loop --help' to see all available options."
