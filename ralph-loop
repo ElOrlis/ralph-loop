@@ -379,6 +379,67 @@ Try using an absolute path: $(pwd)/$PRD_FILE"
     fi
 }
 
+# Resolve the per-PRD state directory: .ralph/<slug>/ at repo root, or the
+# user-provided --state-dir. Sets STATE_DIR, JSON_FILE, PROGRESS_FILE,
+# MCP_CONFIG_FILE, SOURCE_REL_PATH globals. Writes a .source sentinel and
+# verifies it on subsequent runs. Prints a one-time .gitignore hint when
+# the top-level .ralph/ is first created.
+resolve_state_dir() {
+    local resolver_args=(--prd "$PRD_FILE")
+    if [ -n "$STATE_DIR_OVERRIDE" ]; then
+        resolver_args+=(--state-dir "$STATE_DIR_OVERRIDE")
+    fi
+
+    local resolver_json
+    if ! resolver_json=$(node "$SCRIPT_DIR/lib/state/index.js" resolve-paths "${resolver_args[@]}" 2>&1); then
+        error_exit "Failed to resolve state directory: $resolver_json" \
+            "Ensure you are inside a git repo, or pass --state-dir <path>."
+    fi
+
+    STATE_DIR=$(echo "$resolver_json" | jq -r '.stateDir')
+    JSON_FILE=$(echo "$resolver_json" | jq -r '.jsonFile')
+    PROGRESS_FILE=$(echo "$resolver_json" | jq -r '.progressFile')
+    MCP_CONFIG_FILE=$(echo "$resolver_json" | jq -r '.mcpConfigFile')
+    SOURCE_REL_PATH=$(echo "$resolver_json" | jq -r '.source // ""')
+
+    # Detect first-creation of the top-level .ralph/ for the .gitignore hint.
+    local ralph_root_existed=true
+    if [ -z "$STATE_DIR_OVERRIDE" ]; then
+        local ralph_root="$(dirname "$STATE_DIR")"
+        if [ ! -d "$ralph_root" ]; then
+            ralph_root_existed=false
+        fi
+    fi
+
+    mkdir -p "$STATE_DIR"
+
+    if [ "$ralph_root_existed" = false ]; then
+        local ralph_root="$(dirname "$STATE_DIR")"
+        echo -e "${BLUE}[INFO] Created $ralph_root. Add '.ralph/' to your .gitignore to keep generated state out of version control.${NC}"
+    fi
+
+    # Write or verify the .source sentinel for slug-collision detection.
+    if [ -n "$SOURCE_REL_PATH" ]; then
+        local source_file="$STATE_DIR/.source"
+        if [ -f "$source_file" ]; then
+            local existing
+            existing=$(cat "$source_file")
+            if [ "$existing" != "$SOURCE_REL_PATH" ]; then
+                error_exit "Slug collision detected for $STATE_DIR" \
+                    "This directory was previously used for PRD '$existing' but the current PRD resolves to '$SOURCE_REL_PATH'. Bump the slug hash length: RALPH_SLUG_HASH_LEN=8 ./ralph-loop ..."
+            fi
+        else
+            echo "$SOURCE_REL_PATH" > "$source_file"
+        fi
+    fi
+
+    if [ "$DEBUG" = true ]; then
+        echo -e "${BLUE}[DEBUG] STATE_DIR: $STATE_DIR${NC}"
+        echo -e "${BLUE}[DEBUG] JSON_FILE: $JSON_FILE${NC}"
+        echo -e "${BLUE}[DEBUG] PROGRESS_FILE: $PROGRESS_FILE${NC}"
+    fi
+}
+
 # Convert markdown PRD to JSON format
 convert_prd_to_json() {
     local prd_dir=$(dirname "$PRD_FILE")
@@ -2999,6 +3060,7 @@ Try again later or check Claude API status at https://status.anthropic.com"
 main() {
     parse_arguments "$@"
     validate_prd_file
+    resolve_state_dir
 
     # If we get here, all validation passed
     if [ "$DEBUG" = true ]; then
