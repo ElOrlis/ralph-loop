@@ -45,6 +45,7 @@ TEST_SCRIPTS=(
     "test-dependency-graph.sh"
     "test-mcp.sh"
     "test-report.sh"
+    "test-state-paths.sh"
 )
 
 # Run each test suite
