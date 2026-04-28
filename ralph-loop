@@ -2136,6 +2136,11 @@ MCP: $mcp_status
 EOF
 }
 
+# Stub overridden in Task 11.
+log_iteration_reviewer() {
+    :
+}
+
 # Log learnings to progress file
 log_learnings() {
     local learnings="$1"
@@ -2353,6 +2358,23 @@ check_thrash() {
     done
 
     return 1  # No thrash
+}
+
+# Count the most recent run of consecutive iteration FAILs from PROGRESS_FILE.
+# Echo the integer count.
+recent_consecutive_failures() {
+    local count=0
+    if [ ! -f "$PROGRESS_FILE" ]; then echo 0; return; fi
+    # Walk backward over Result: lines.
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^Result:\ FAILED ]]; then
+            count=$((count + 1))
+        elif [[ "$line" =~ ^Result: ]]; then
+            break
+        fi
+    done < <(grep -E '^Result:' "$PROGRESS_FILE" | tail -r 2>/dev/null || tac)
+    echo "$count"
 }
 
 # Create GitHub issue for a task if one doesn't exist
@@ -2751,13 +2773,21 @@ run_ralph_loop() {
         # Generate Claude prompt via prompt builder
         local json_basename=$(basename "$JSON_FILE")
         local progress_basename=$(basename "$PROGRESS_FILE")
+        local consecutive_failures
+        consecutive_failures=$(recent_consecutive_failures)
+        local feedback_args=()
+        local feedback_path="${STATE_DIR}/reviewer-feedback.txt"
+        if [ -f "$feedback_path" ]; then
+            feedback_args+=(--reviewer-feedback-file "$feedback_path" --consecutive-failures "$consecutive_failures")
+        fi
         local claude_prompt
         local prompt_exit=0
         claude_prompt=$(node "$SCRIPT_DIR/lib/prompt/index.js" build \
             --task-file "$JSON_FILE" \
             --task-id "$next_task_id" \
             --json-file "$json_basename" \
-            --progress-file "$progress_basename" 2>&1) || prompt_exit=$?
+            --progress-file "$progress_basename" \
+            "${feedback_args[@]}" 2>&1) || prompt_exit=$?
 
         if [ $prompt_exit -ne 0 ]; then
             error_exit "Failed to build prompt for task $next_task_id" "Check lib/prompt/ module. Error: $claude_prompt"
@@ -3123,6 +3153,64 @@ Try again later or check Claude API status at https://status.anthropic.com"
                 fi
                 result_idx=$((result_idx + 1))
             done
+
+            # Reviewer pass: only when --reviewer != none AND at least one criterion failed.
+            if [ "$REVIEWER" != "none" ]; then
+                local fail_count
+                fail_count=$(echo "$verify_result" | jq '[.results[] | select(.passed==false)] | length' 2>/dev/null || echo 0)
+                if [ "$fail_count" -gt 0 ]; then
+                    local reviewer_results_file="${STATE_DIR}/reviewer-results-${iteration}.json"
+                    local reviewer_tail_file="${STATE_DIR}/reviewer-tail-${iteration}.txt"
+                    local reviewer_prompt_file="${STATE_DIR}/reviewer-prompt-${iteration}.txt"
+                    local reviewer_feedback_file="${STATE_DIR}/reviewer-feedback.txt"
+
+                    echo "$verify_result" > "$reviewer_results_file"
+                    echo "$claude_output" | tail -n 80 > "$reviewer_tail_file"
+
+                    if ! node "$SCRIPT_DIR/lib/prompt/index.js" build-review \
+                            --task-file "$JSON_FILE" \
+                            --task-id "$next_task_id" \
+                            --criteria-results-file "$reviewer_results_file" \
+                            --agent-output-tail-file "$reviewer_tail_file" \
+                            > "$reviewer_prompt_file"; then
+                        echo -e "${YELLOW}[WARN] Failed to build reviewer prompt; skipping reviewer pass.${NC}"
+                    else
+                        local reviewer_mcp=""
+                        if [ "$MCP_ENABLED" = true ]; then
+                            reviewer_mcp="${STATE_DIR}/mcp-config.${REVIEWER}.json"
+                        fi
+                        local reviewer_status="ok"
+                        if invoke_agent "$REVIEWER" "$reviewer_prompt_file" "$reviewer_mcp"; then
+                            echo "$agent_output" > "$reviewer_feedback_file"
+                        else
+                            reviewer_status="degraded"
+                            echo -e "${YELLOW}[WARN] Reviewer ($REVIEWER) call failed; continuing.${NC}"
+                            echo "$agent_output" > "$reviewer_feedback_file"
+                        fi
+
+                        # Always-on: post comment to GitHub issue.
+                        local task_issue_number
+                        task_issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+                        if [ "$GITHUB_ENABLED" = true ] && [ -n "$TARGET_REPO" ] && [ -n "$task_issue_number" ]; then
+                            node "$SCRIPT_DIR/lib/github/index.js" post-reviewer-comment \
+                                --repo "$TARGET_REPO" \
+                                --issue-number "$task_issue_number" \
+                                --agent "$REVIEWER" \
+                                --body-file "$reviewer_feedback_file" \
+                                >/dev/null 2>&1 \
+                                || echo -e "${YELLOW}[WARN] Failed to post reviewer comment.${NC}"
+                        fi
+
+                        log_iteration_reviewer "$REVIEWER" "$reviewer_status"
+                    fi
+
+                    rm -f "$reviewer_results_file" "$reviewer_tail_file" "$reviewer_prompt_file"
+                else
+                    log_iteration_reviewer "$REVIEWER" "n/a"
+                fi
+            else
+                log_iteration_reviewer "none" "n/a"
+            fi
 
             # Post iteration comment to GitHub issue
             post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result" "$mcp_status"
