@@ -506,6 +506,69 @@ Ralph now stores state under .ralph/<slug>/." \
 To start fresh and ignore the legacy files, delete or move them yourself."
 }
 
+# When --migrate-state is set, move legacy files into STATE_DIR using `git mv`
+# for tracked files and plain `mv` otherwise. Sibling <basename>.json renames
+# to prd.json; progress.txt and archives keep their names. Hard-error if any
+# canonical file already exists at the destination.
+migrate_legacy_state() {
+    if [ "$MIGRATE_STATE" != true ]; then
+        return 0
+    fi
+
+    local legacy
+    legacy="$(detect_legacy_state)"
+    if [ -z "$legacy" ]; then
+        echo -e "${BLUE}[INFO] --migrate-state: no legacy files found; nothing to do.${NC}"
+        return 0
+    fi
+
+    # Refuse if destination already has canonical files.
+    local existing
+    existing="$(find "$STATE_DIR" -maxdepth 1 -type f \( -name 'prd.json' -o -name 'progress.txt' -o -name 'progress-*.txt' \) 2>/dev/null)"
+    if [ -n "$existing" ]; then
+        error_exit "Destination already populated; refusing to overwrite:
+$(echo "$existing" | sed 's/^/  - /')" \
+            "Inspect $STATE_DIR and remove conflicting files manually if you want to re-migrate."
+    fi
+
+    echo -e "${BLUE}[INFO] Migrating legacy state into $STATE_DIR${NC}"
+    echo "  Source                                Destination                    Transport"
+
+    local prd_dir
+    prd_dir="$(dirname "$PRD_FILE")"
+    local prd_basename
+    prd_basename="$(basename "$PRD_FILE")"
+    local prd_name="${prd_basename%.*}"
+    local sibling_json="${prd_dir}/${prd_name}.json"
+
+    local file
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        local dest
+        if [ "$file" = "$sibling_json" ]; then
+            dest="$STATE_DIR/prd.json"
+        else
+            dest="$STATE_DIR/$(basename "$file")"
+        fi
+
+        local transport="mv"
+        if git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+            if git mv "$file" "$dest" 2>/dev/null; then
+                transport="git mv"
+            else
+                # Fall back to plain mv if git mv fails (e.g., dest path quirks).
+                mv "$file" "$dest"
+            fi
+        else
+            mv "$file" "$dest"
+        fi
+
+        printf "  %-37s %-30s %s\n" "$file" "$dest" "$transport"
+    done <<< "$legacy"
+
+    echo -e "${GREEN}✓${NC} Migration complete."
+}
+
 # Convert markdown PRD to JSON format
 convert_prd_to_json() {
     # JSON_FILE is set by resolve_state_dir; honor that as the canonical path.
@@ -3119,6 +3182,7 @@ main() {
     validate_prd_file
     resolve_state_dir
     enforce_no_legacy
+    migrate_legacy_state
 
     # If we get here, all validation passed
     if [ "$DEBUG" = true ]; then
