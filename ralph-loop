@@ -440,6 +440,40 @@ resolve_state_dir() {
     fi
 }
 
+# Print legacy state paths (one per line) for the current PRD. Used by both
+# pre-flight and migration. Skipped when STATE_DIR_OVERRIDE is set.
+detect_legacy_state() {
+    if [ -n "$STATE_DIR_OVERRIDE" ]; then
+        return 0
+    fi
+
+    local prd_dir
+    prd_dir="$(dirname "$PRD_FILE")"
+    local prd_basename
+    prd_basename="$(basename "$PRD_FILE")"
+    local prd_name="${prd_basename%.*}"
+
+    # Sibling JSON: skip when the PRD itself IS the JSON.
+    if [[ ! "$PRD_FILE" =~ \.json$ ]]; then
+        local sibling_json="${prd_dir}/${prd_name}.json"
+        if [ -f "$sibling_json" ]; then
+            echo "$sibling_json"
+        fi
+    fi
+
+    # cwd progress.txt
+    if [ -f "./progress.txt" ]; then
+        echo "./progress.txt"
+    fi
+
+    # cwd progress-*.txt archives
+    local archive
+    for archive in ./progress-*.txt; do
+        [ -e "$archive" ] || continue
+        echo "$archive"
+    done
+}
+
 # Convert markdown PRD to JSON format
 convert_prd_to_json() {
     # JSON_FILE is set by resolve_state_dir; honor that as the canonical path.
