@@ -46,6 +46,9 @@ TEST_SCRIPTS=(
     "test-mcp.sh"
     "test-report.sh"
     "test-state-paths.sh"
+    "test-agent-selection.sh"
+    "test-reviewer.sh"
+    "test-agent-resume.sh"
 )
 
 # Run each test suite

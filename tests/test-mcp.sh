@@ -208,10 +208,10 @@ else
     fail "progress.txt missing 'MCP: degraded'. Contents: $(cat "$sandbox/progress.txt" 2>/dev/null || echo MISSING)"
 fi
 # Verify sidecar log was written
-if [ -s "$sandbox/mcp-iteration-1.log" ]; then
-    pass "mcp-iteration-1.log written for degraded iteration"
+if [ -s "$sandbox/mcp-iteration-1.claude.log" ]; then
+    pass "mcp-iteration-1.claude.log written for degraded iteration"
 else
-    fail "mcp-iteration-1.log missing or empty"
+    fail "mcp-iteration-1.claude.log missing or empty"
 fi
 rm -rf "$sandbox"
 

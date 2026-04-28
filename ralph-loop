@@ -19,6 +19,9 @@ DRY_RUN=false
 GITHUB_ENABLED=true
 MCP_ENABLED=false
 MCP_CONFIG_FILE=""
+AGENT="claude"
+AGENT_EXPLICIT=false
+REVIEWER="none"
 STATE_DIR=""
 STATE_DIR_OVERRIDE=""
 MIGRATE_STATE=false
@@ -105,6 +108,14 @@ OPTIONS:
   --mcp                   Enable mcpls MCP server for Claude (opt-in).
                           Requires 'mcpls' on PATH. See:
                           https://github.com/bug-ops/mcpls
+  --agent <claude|copilot>
+                          Pick the agent backend for the iteration loop.
+                          Default: claude.
+  --reviewer <none|claude|copilot|auto>
+                          On criterion failure, run a second agent to
+                          suggest a different approach. 'auto' picks the
+                          opposite of --agent (or copilot if --agent is
+                          default). Default: none.
   --repo owner/name      Override target GitHub repository
                           (default: PRD "repository" field or git remote origin)
 
@@ -319,6 +330,26 @@ parse_arguments() {
             --mcp)
                 MCP_ENABLED=true
                 shift
+                ;;
+            --agent)
+                if [ -z "${2:-}" ]; then
+                    error_exit "--agent requires a value: claude or copilot" "Example: ./ralph-loop my-prd.md --agent copilot"
+                fi
+                case "$2" in
+                    claude|copilot) AGENT="$2"; AGENT_EXPLICIT=true ;;
+                    *) error_exit "--agent must be 'claude' or 'copilot' (got: $2)" "Run './ralph-loop --help' for options." ;;
+                esac
+                shift 2
+                ;;
+            --reviewer)
+                if [ -z "${2:-}" ]; then
+                    error_exit "--reviewer requires a value: none, claude, copilot, or auto" "Example: ./ralph-loop my-prd.md --reviewer auto"
+                fi
+                case "$2" in
+                    none|claude|copilot|auto) REVIEWER="$2" ;;
+                    *) error_exit "--reviewer must be one of: none, claude, copilot, auto (got: $2)" "Run './ralph-loop --help' for options." ;;
+                esac
+                shift 2
                 ;;
             --repo)
                 if [ -z "${2:-}" ]; then
@@ -1531,6 +1562,7 @@ commit_iteration() {
         --pass-count "$pass_count"
         --total-count "$total_count"
         --status "$ralph_status"
+        --agent "$AGENT"
         --skip-if-empty
     )
     if [ -n "$issue_number" ]; then
@@ -1669,6 +1701,15 @@ mark_pr_ready() {
 
 # On resume, cross-check task issue states for consistency
 crosscheck_issues() {
+    # Agent mismatch warning runs regardless of GitHub state.
+    if [ "$RESUME" = true ] && [ -f "$PROGRESS_FILE" ]; then
+        local prev_agent
+        prev_agent=$(grep -E '^Agent: ' "$PROGRESS_FILE" | tail -n 1 | awk '{print $2}')
+        if [ -n "$prev_agent" ] && [ "$prev_agent" != "$AGENT" ]; then
+            echo -e "${YELLOW}[WARN] Previous run used agent '$prev_agent'; current run uses '$AGENT'. Continuing.${NC}"
+        fi
+    fi
+
     if [ "$GITHUB_ENABLED" = false ]; then
         return 0
     fi
@@ -2097,6 +2138,21 @@ Details: $details
 EOF
 }
 
+log_iteration_agent() {
+    local agent="$1"
+    cat >> "$PROGRESS_FILE" << EOF
+Agent: $agent
+EOF
+}
+
+log_iteration_reviewer() {
+    local agent="$1"
+    local status="$2"
+    cat >> "$PROGRESS_FILE" << EOF
+Reviewer: $agent $status
+EOF
+}
+
 log_iteration_mcp() {
     local mcp_status="$1"
 
@@ -2270,6 +2326,32 @@ update_task_attempts() {
     fi
 }
 
+# invoke_agent <agent> <prompt_file> <mcp_config_file>
+# Captures stdout+stderr into global $agent_output, returns the agent exit code.
+invoke_agent() {
+    local agent="$1"
+    local prompt_file="$2"
+    local mcp_config="$3"
+    local mcp_args=()
+    if [ -n "$mcp_config" ]; then
+        mcp_args+=(--mcp-config "$mcp_config")
+    fi
+    case "$agent" in
+        claude)
+            agent_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1)
+            return $?
+            ;;
+        copilot)
+            agent_output=$(copilot -p --allow-all-tools "${mcp_args[@]}" < "$prompt_file" 2>&1)
+            return $?
+            ;;
+        *)
+            agent_output="invoke_agent: unsupported agent: $agent"
+            return 2
+            ;;
+    esac
+}
+
 # Check for thrash: criterion failing 4+ consecutive times with no progress
 check_thrash() {
     local task_id="$1"
@@ -2296,6 +2378,23 @@ check_thrash() {
     done
 
     return 1  # No thrash
+}
+
+# Count the most recent run of consecutive iteration FAILs from PROGRESS_FILE.
+# Echo the integer count.
+recent_consecutive_failures() {
+    local count=0
+    if [ ! -f "$PROGRESS_FILE" ]; then echo 0; return; fi
+    # Walk backward over Result: lines.
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^Result:\ FAILED ]]; then
+            count=$((count + 1))
+        elif [[ "$line" =~ ^Result: ]]; then
+            break
+        fi
+    done < <(grep -E '^Result:' "$PROGRESS_FILE" | tail -r 2>/dev/null || tac)
+    echo "$count"
 }
 
 # Create GitHub issue for a task if one doesn't exist
@@ -2488,6 +2587,7 @@ post_iteration_comment() {
         --max-iterations "$MAX_ITERATIONS" \
         --results "$results_json" \
         --criteria "$criteria_json" \
+        --agent "$AGENT" \
         "${mcp_args[@]}" 2>&1 || {
         echo -e "${YELLOW}[WARN] Failed to post comment to issue #$issue_number${NC}"
     }
@@ -2606,11 +2706,26 @@ run_ralph_loop() {
 
     # Generate MCP config once per run; MCP_CONFIG_FILE is set by resolve_state_dir.
     if [ "$MCP_ENABLED" = true ]; then
-        if ! node "$SCRIPT_DIR/lib/mcp/index.js" write-config --output "$MCP_CONFIG_FILE" > /dev/null; then
-            error_exit "Failed to write MCP config to $MCP_CONFIG_FILE" "Check filesystem permissions and rerun."
+        # Write the primary agent's config always.
+        if ! node "$SCRIPT_DIR/lib/mcp/index.js" write-config \
+                --output "${STATE_DIR}/mcp-config.${AGENT}.json" \
+                --agent "$AGENT" > /dev/null; then
+            error_exit "Failed to write MCP config for $AGENT" "Check filesystem permissions and rerun."
         fi
+
+        # If reviewer is a different agent, write its config too.
+        if [ "$REVIEWER" != "none" ] && [ "$REVIEWER" != "$AGENT" ]; then
+            if ! node "$SCRIPT_DIR/lib/mcp/index.js" write-config \
+                    --output "${STATE_DIR}/mcp-config.${REVIEWER}.json" \
+                    --agent "$REVIEWER" > /dev/null; then
+                error_exit "Failed to write MCP config for $REVIEWER" "Check filesystem permissions and rerun."
+            fi
+        fi
+
+        # Back-compat: keep the legacy MCP_CONFIG_FILE pointing at the primary.
+        MCP_CONFIG_FILE="${STATE_DIR}/mcp-config.${AGENT}.json"
         if [ "$VERBOSE" = true ]; then
-            echo -e "${BLUE}[VERBOSE] MCP enabled; config at $MCP_CONFIG_FILE${NC}"
+            echo -e "${BLUE}[VERBOSE] MCP enabled; primary config at $MCP_CONFIG_FILE${NC}"
         fi
     fi
 
@@ -2675,13 +2790,21 @@ run_ralph_loop() {
         # Generate Claude prompt via prompt builder
         local json_basename=$(basename "$JSON_FILE")
         local progress_basename=$(basename "$PROGRESS_FILE")
+        local consecutive_failures
+        consecutive_failures=$(recent_consecutive_failures)
+        local feedback_args=()
+        local feedback_path="${STATE_DIR}/reviewer-feedback.txt"
+        if [ -f "$feedback_path" ]; then
+            feedback_args+=(--reviewer-feedback-file "$feedback_path" --consecutive-failures "$consecutive_failures")
+        fi
         local claude_prompt
         local prompt_exit=0
         claude_prompt=$(node "$SCRIPT_DIR/lib/prompt/index.js" build \
             --task-file "$JSON_FILE" \
             --task-id "$next_task_id" \
             --json-file "$json_basename" \
-            --progress-file "$progress_basename" 2>&1) || prompt_exit=$?
+            --progress-file "$progress_basename" \
+            "${feedback_args[@]}" 2>&1) || prompt_exit=$?
 
         if [ $prompt_exit -ne 0 ]; then
             error_exit "Failed to build prompt for task $next_task_id" "Check lib/prompt/ module. Error: $claude_prompt"
@@ -2759,10 +2882,8 @@ run_ralph_loop() {
         # Run claude with appropriate flags
         local api_start_time=$(date +%s)
 
-        local mcp_args=()
-        if [ "$MCP_ENABLED" = true ] && [ -n "$MCP_CONFIG_FILE" ]; then
-            mcp_args+=(--mcp-config "$MCP_CONFIG_FILE")
-        fi
+        local primary_mcp=""
+        if [ "$MCP_ENABLED" = true ]; then primary_mcp="$MCP_CONFIG_FILE"; fi
 
         # Retry loop for API calls
         while [ $retry_count -lt $max_retries ] && [ "$api_success" = false ]; do
@@ -2782,7 +2903,8 @@ run_ralph_loop() {
                     echo ""
                 fi
                 echo -e "${BLUE}[DEBUG] Calling Claude API...${NC}"
-                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
+                if invoke_agent "$AGENT" "$prompt_file" "$primary_mcp"; then
+                    claude_output="$agent_output"
                     api_success=true
                     echo ""
                     echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -2795,6 +2917,7 @@ run_ralph_loop() {
                     echo ""
                 else
                     claude_exit_code=$?
+                    claude_output="$agent_output"
                 fi
             elif [ "$VERBOSE" = true ]; then
                 if [ $retry_count -eq 0 ]; then
@@ -2805,17 +2928,21 @@ run_ralph_loop() {
                     echo ""
                 fi
                 echo -e "${BLUE}[VERBOSE] Calling Claude API...${NC}"
-                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
+                if invoke_agent "$AGENT" "$prompt_file" "$primary_mcp"; then
+                    claude_output="$agent_output"
                     api_success=true
                     echo -e "${GREEN}[VERBOSE] Claude API call completed${NC}"
                 else
                     claude_exit_code=$?
+                    claude_output="$agent_output"
                 fi
             else
-                if claude_output=$(claude --dangerously-skip-permissions --print "${mcp_args[@]}" < "$prompt_file" 2>&1); then
+                if invoke_agent "$AGENT" "$prompt_file" "$primary_mcp"; then
+                    claude_output="$agent_output"
                     api_success=true
                 else
                     claude_exit_code=$?
+                    claude_output="$agent_output"
                 fi
             fi
 
@@ -2878,11 +3005,12 @@ Try again later or check Claude API status at https://status.anthropic.com"
             echo -e "${YELLOW}[WARN] MCP-related signal in Claude output this iteration; continuing.${NC}"
             # Sidecar log for debuggability
             echo "$claude_output" | grep -Ei 'mcpls|(^|[^a-z])mcp([^a-z]|$)' \
-                > "${STATE_DIR}/mcp-iteration-${iteration}.log" 2>/dev/null || true
+                > "${STATE_DIR}/mcp-iteration-${iteration}.${AGENT}.log" 2>/dev/null || true
         else
             mcp_status="ok"
         fi
 
+        log_iteration_agent "$AGENT"
         log_iteration_mcp "$mcp_status"
 
         # Validate JSON wasn't corrupted by Claude
@@ -2973,6 +3101,8 @@ Try again later or check Claude API status at https://status.anthropic.com"
             echo "$updated_prd" | jq '.' > "$JSON_FILE"
 
             log_iteration_result "$iteration" "$next_task_id" "PASSED" "All criteria verified"
+            # Reviewer n/a: all criteria passed, no reviewer call needed.
+            log_iteration_reviewer "$REVIEWER" "n/a"
 
             # Post iteration comment to GitHub issue
             post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result" "$mcp_status"
@@ -3039,6 +3169,64 @@ Try again later or check Claude API status at https://status.anthropic.com"
                 fi
                 result_idx=$((result_idx + 1))
             done
+
+            # Reviewer pass: only when --reviewer != none AND at least one criterion failed.
+            if [ "$REVIEWER" != "none" ]; then
+                local fail_count
+                fail_count=$(echo "$verify_result" | jq '[.results[] | select(.passed==false)] | length' 2>/dev/null || echo 0)
+                if [ "$fail_count" -gt 0 ]; then
+                    local reviewer_results_file="${STATE_DIR}/reviewer-results-${iteration}.json"
+                    local reviewer_tail_file="${STATE_DIR}/reviewer-tail-${iteration}.txt"
+                    local reviewer_prompt_file="${STATE_DIR}/reviewer-prompt-${iteration}.txt"
+                    local reviewer_feedback_file="${STATE_DIR}/reviewer-feedback.txt"
+
+                    echo "$verify_result" | jq -c '.results' > "$reviewer_results_file"
+                    echo "$claude_output" | tail -n 80 > "$reviewer_tail_file"
+
+                    if ! node "$SCRIPT_DIR/lib/prompt/index.js" build-review \
+                            --task-file "$JSON_FILE" \
+                            --task-id "$next_task_id" \
+                            --criteria-results-file "$reviewer_results_file" \
+                            --agent-output-tail-file "$reviewer_tail_file" \
+                            > "$reviewer_prompt_file"; then
+                        echo -e "${YELLOW}[WARN] Failed to build reviewer prompt; skipping reviewer pass.${NC}"
+                    else
+                        local reviewer_mcp=""
+                        if [ "$MCP_ENABLED" = true ]; then
+                            reviewer_mcp="${STATE_DIR}/mcp-config.${REVIEWER}.json"
+                        fi
+                        local reviewer_status="ok"
+                        if invoke_agent "$REVIEWER" "$reviewer_prompt_file" "$reviewer_mcp"; then
+                            echo "$agent_output" > "$reviewer_feedback_file"
+                        else
+                            reviewer_status="degraded"
+                            echo -e "${YELLOW}[WARN] Reviewer ($REVIEWER) call failed; continuing.${NC}"
+                            echo "$agent_output" > "$reviewer_feedback_file"
+                        fi
+
+                        # Always-on: post comment to GitHub issue.
+                        local task_issue_number
+                        task_issue_number=$(jq -r ".tasks[$task_index].issueNumber // empty" "$JSON_FILE")
+                        if [ "$GITHUB_ENABLED" = true ] && [ -n "$TARGET_REPO" ] && [ -n "$task_issue_number" ]; then
+                            node "$SCRIPT_DIR/lib/github/index.js" post-reviewer-comment \
+                                --repo "$TARGET_REPO" \
+                                --issue-number "$task_issue_number" \
+                                --agent "$REVIEWER" \
+                                --body-file "$reviewer_feedback_file" \
+                                >/dev/null 2>&1 \
+                                || echo -e "${YELLOW}[WARN] Failed to post reviewer comment.${NC}"
+                        fi
+
+                        log_iteration_reviewer "$REVIEWER" "$reviewer_status"
+                    fi
+
+                    rm -f "$reviewer_results_file" "$reviewer_tail_file" "$reviewer_prompt_file"
+                else
+                    log_iteration_reviewer "$REVIEWER" "n/a"
+                fi
+            else
+                log_iteration_reviewer "none" "n/a"
+            fi
 
             # Post iteration comment to GitHub issue
             post_iteration_comment "$next_task_id" "$task_index" "$iteration" "$verify_result" "$mcp_status"
@@ -3205,6 +3393,26 @@ Try again later or check Claude API status at https://status.anthropic.com"
 # Main entry point
 main() {
     parse_arguments "$@"
+
+    # Resolve --reviewer auto
+    if [ "$REVIEWER" = "auto" ]; then
+        if [ "$AGENT_EXPLICIT" = true ]; then
+            if [ "$AGENT" = "claude" ]; then REVIEWER="copilot"; else REVIEWER="claude"; fi
+        else
+            REVIEWER="copilot"
+        fi
+    fi
+
+    # Preflight: required binaries on PATH
+    if ! command -v "$AGENT" >/dev/null 2>&1; then
+        error_exit "Agent binary '$AGENT' not found on PATH" "Install it or pick a different --agent value."
+    fi
+    if [ "$REVIEWER" != "none" ] && [ "$REVIEWER" != "$AGENT" ]; then
+        if ! command -v "$REVIEWER" >/dev/null 2>&1; then
+            error_exit "Reviewer binary '$REVIEWER' not found on PATH" "Install it or pick a different --reviewer value."
+        fi
+    fi
+
     validate_prd_file
     resolve_state_dir
     enforce_no_legacy
