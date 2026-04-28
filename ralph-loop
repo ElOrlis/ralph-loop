@@ -442,10 +442,8 @@ resolve_state_dir() {
 
 # Convert markdown PRD to JSON format
 convert_prd_to_json() {
-    local prd_dir=$(dirname "$PRD_FILE")
-    local prd_basename=$(basename "$PRD_FILE")
-    local prd_name="${prd_basename%.*}"
-    local json_file="${prd_dir}/${prd_name}.json"
+    # JSON_FILE is set by resolve_state_dir; honor that as the canonical path.
+    local json_file="$JSON_FILE"
 
     # If input is already JSON, just set JSON_FILE and return
     if [[ "$PRD_FILE" =~ \.json$ ]]; then
