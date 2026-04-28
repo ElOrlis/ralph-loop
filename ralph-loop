@@ -70,7 +70,8 @@ comprehensive help system and progress tracking.
    ./ralph-loop your-prd.md
 
 3. REVIEW RESULTS
-   Check progress.txt for detailed logs and your-prd.json for final status.
+   Check .ralph/<slug>/progress.txt for detailed logs and
+   .ralph/<slug>/prd.json for final status.
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                              USAGE                                         ║
@@ -85,7 +86,7 @@ OPTIONS:
   --max-iterations N      Maximum iterations to run (default: 15)
   --verbose               Show detailed progress and API metadata
   --debug                 Show full Claude output and internal state
-  --resume                Resume from last checkpoint in progress.txt
+  --resume                Resume from last checkpoint in .ralph/<slug>/progress.txt
   --analyze-prd           Analyze PRD quality and suggest improvements
   --report                Print a project-status report for the PRD
                           (iteration counts, per-task breakdown,
@@ -224,15 +225,16 @@ SOLUTION: Check the path to your PRD file. Use absolute paths or ensure you're
 • Include specific test commands in acceptance criteria
 • Set realistic max-iterations based on PRD complexity
 • Use --verbose to understand what's happening during execution
-• Check progress.txt regularly to see detailed logs
+• Check .ralph/<slug>/progress.txt regularly to see detailed logs
 
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                         FILES CREATED                                      ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
-  your-prd.json          Converted PRD with task status
-  progress.txt           Detailed iteration logs and learnings
-  progress-*.txt         Archived logs from previous runs
+  .ralph/<slug>/prd.json          Converted PRD with task status
+  .ralph/<slug>/progress.txt      Detailed iteration logs and learnings
+  .ralph/<slug>/progress-*.txt    Archived logs from previous runs
+  .ralph/<slug>/.source           Sentinel: repo-relative PRD path
 
 EOF
 }
