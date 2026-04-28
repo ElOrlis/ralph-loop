@@ -45,7 +45,8 @@ npm test
 ```bash
 ./ralph-loop <prd-file.md> [--max-iterations N] [--verbose] [--debug] [--resume] \
   [--analyze-prd] [--dry-run] [--no-github] [--no-branch] [--repo owner/name] \
-  [--mcp] [--report] [--state-dir <path>] [--migrate-state]
+  [--mcp] [--report] [--state-dir <path>] [--migrate-state] \
+  [--agent claude|copilot] [--reviewer none|claude|copilot|auto]
 ```
 
 ## Architecture
@@ -148,3 +149,4 @@ A small Node.js component with SQLite (demo artifacts, not part of the main tool
 - PRD JSON root may contain `githubProject` (project metadata + field IDs); each task may contain `projectItemId`. Both optional and populated automatically.
 - MCP integration is opt-in via `--mcp`. When enabled, Ralph generates `mcp-config.json` once per run and passes `--mcp-config` to every Claude invocation. Per-iteration MCP health is captured in `progress.txt` and (when GitHub is enabled) on the issue comment.
 - Phase B: `--report` produces an offline status report; `--analyze-prd` includes deterministic type-hint suggestions for untyped criteria. Both features are read-only and make no API calls.
+- Agent backend is selected with `--agent claude|copilot` (default `claude`). Optional `--reviewer none|claude|copilot|auto` runs a second agent on criterion failure; `auto` picks the opposite of `--agent`. Reviewer feedback is always commented on the issue (when GitHub is on) and is injected into the next prompt only after 4 consecutive failures (the existing thrash threshold). Per-agent MCP configs live at `.ralph/<slug>/mcp-config.<agent>.json`. Per-iteration MCP logs are suffixed `mcp-iteration-N.<agent>.log`. Commits include a `Ralph-Agent: <agent>` trailer.
