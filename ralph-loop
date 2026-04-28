@@ -1791,8 +1791,7 @@ get_last_iteration() {
 
 # Prompt user for resume or fresh start
 prompt_resume_or_fresh() {
-    local prd_dir=$(dirname "$JSON_FILE")
-    local progress_file="${prd_dir}/progress.txt"
+    local progress_file="$PROGRESS_FILE"
 
     echo ""
     echo -e "${YELLOW}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -1832,8 +1831,7 @@ prompt_resume_or_fresh() {
 
 # Initialize progress file
 initialize_progress_file() {
-    local prd_dir=$(dirname "$JSON_FILE")
-    local progress_file="${prd_dir}/progress.txt"
+    local progress_file="$PROGRESS_FILE"
 
     # --dry-run must not write any files or prompt the user
     if [ "$DRY_RUN" = true ]; then
@@ -1854,7 +1852,7 @@ initialize_progress_file() {
     # If not resuming, archive existing progress file
     if [ -f "$progress_file" ] && [ "$RESUME" = false ]; then
         local timestamp=$(date +%Y%m%d-%H%M%S)
-        local archive_file="${prd_dir}/progress-${timestamp}.txt"
+        local archive_file="${STATE_DIR}/progress-${timestamp}.txt"
         mv "$progress_file" "$archive_file"
         if [ "$VERBOSE" = true ]; then
             echo -e "${BLUE}[INFO] Archived existing progress file to: $archive_file${NC}"
@@ -3091,9 +3089,7 @@ main() {
 
     # If report mode, print status report and exit
     if [ "$REPORT_MODE" = true ]; then
-        local prd_dir
-        prd_dir="$(dirname "$JSON_FILE")"
-        run_report "$JSON_FILE" "${prd_dir}/progress.txt"
+        run_report "$JSON_FILE" "$PROGRESS_FILE"
         exit 0
     fi
 
