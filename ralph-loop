@@ -2449,11 +2449,8 @@ run_ralph_loop() {
         fi
     fi
 
-    # Generate MCP config once per run, alongside progress.txt.
+    # Generate MCP config once per run; MCP_CONFIG_FILE is set by resolve_state_dir.
     if [ "$MCP_ENABLED" = true ]; then
-        local prd_dir
-        prd_dir="$(dirname "$JSON_FILE")"
-        MCP_CONFIG_FILE="${prd_dir}/mcp-config.json"
         if ! node "$SCRIPT_DIR/lib/mcp/index.js" write-config --output "$MCP_CONFIG_FILE" > /dev/null; then
             error_exit "Failed to write MCP config to $MCP_CONFIG_FILE" "Check filesystem permissions and rerun."
         fi
@@ -2725,10 +2722,8 @@ Try again later or check Claude API status at https://status.anthropic.com"
             mcp_status="degraded"
             echo -e "${YELLOW}[WARN] MCP-related signal in Claude output this iteration; continuing.${NC}"
             # Sidecar log for debuggability
-            local prd_dir
-            prd_dir="$(dirname "$JSON_FILE")"
             echo "$claude_output" | grep -Ei 'mcpls|(^|[^a-z])mcp([^a-z]|$)' \
-                > "${prd_dir}/mcp-iteration-${iteration}.log" 2>/dev/null || true
+                > "${STATE_DIR}/mcp-iteration-${iteration}.log" 2>/dev/null || true
         else
             mcp_status="ok"
         fi
