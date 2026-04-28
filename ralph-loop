@@ -2706,10 +2706,6 @@ run_ralph_loop() {
 
     # Generate MCP config once per run; MCP_CONFIG_FILE is set by resolve_state_dir.
     if [ "$MCP_ENABLED" = true ]; then
-        # Compute per-agent config paths under STATE_DIR.
-        MCP_CONFIG_FILE_CLAUDE="${STATE_DIR}/mcp-config.claude.json"
-        MCP_CONFIG_FILE_COPILOT="${STATE_DIR}/mcp-config.copilot.json"
-
         # Write the primary agent's config always.
         if ! node "$SCRIPT_DIR/lib/mcp/index.js" write-config \
                 --output "${STATE_DIR}/mcp-config.${AGENT}.json" \
@@ -2886,10 +2882,6 @@ run_ralph_loop() {
         # Run claude with appropriate flags
         local api_start_time=$(date +%s)
 
-        local mcp_args=()
-        if [ "$MCP_ENABLED" = true ] && [ -n "$MCP_CONFIG_FILE" ]; then
-            mcp_args+=(--mcp-config "$MCP_CONFIG_FILE")
-        fi
         local primary_mcp=""
         if [ "$MCP_ENABLED" = true ]; then primary_mcp="$MCP_CONFIG_FILE"; fi
 
