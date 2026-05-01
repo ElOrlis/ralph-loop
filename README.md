@@ -35,126 +35,190 @@ Ralph Loop is a production-ready tool that iteratively calls Claude to complete 
 
 ## Prerequisites
 
-Before installing Ralph Loop, ensure you have the following dependencies:
+Before installing Ralph Loop, ensure you have the following dependencies.
 
-### Required Dependencies
+### Required
 
-1. **Bash 4.0 or higher**
-   ```bash
-   # Check your bash version
-   bash --version
-   ```
+| Tool | Version | Why |
+|------|---------|-----|
+| **Bash** | 4.0+ | The orchestrator is a single Bash script |
+| **Node.js** | 18+ | All lib/ helpers (prompt builder, criteria runner, deps graph, github, git, mcp config) are Node modules invoked from Bash |
+| **jq** | 1.6+ | JSON parsing and manipulation in the Bash layer |
+| **git** | 2.x+ | Per-task branching, dependency-branch merges, repo resolution |
+| **Claude CLI** | latest | Default agent backend (`claude --dangerously-skip-permissions --print`) |
+| **gh** (GitHub CLI) | 2.x+ | GitHub issues, Projects v2, draft PRs. Required unless you always pass `--no-github` |
+| **Standard Unix utilities** | — | `cat`, `grep`, `sed`, `date`, `mktemp` (pre-installed on macOS/Linux) |
 
-2. **Claude CLI**
-   - Install from: [https://docs.anthropic.com/claude/docs/claude-cli](https://docs.anthropic.com/claude/docs/claude-cli)
-   - Verify installation:
-   ```bash
-   which claude
-   ```
+### Optional
 
-3. **jq** (JSON processor)
-   - Version 1.6 or higher required
-   - Used for JSON parsing and manipulation
+| Tool | When you need it |
+|------|------------------|
+| **GitHub Copilot CLI** (`gh copilot` / `copilot`) | When using `--agent copilot` or `--reviewer copilot\|auto` |
+| **`mcpls`** | When using `--mcp` (LSP-backed MCP server). Also requires at least one LSP server on `PATH` (rust-analyzer, pyright, gopls, typescript-language-server, etc.) |
+| **`sqlite3`** (npm package) | Only for the legacy `models/` + `database/` demo tests (`npm test`). Not needed to run Ralph itself |
 
-4. **Standard Unix utilities**
-   - `cat`, `grep`, `sed`, `date`, `mktemp`
-   - Usually pre-installed on macOS and Linux
+### Quick check
+
+```bash
+bash --version       # 4.0+
+node --version       # 18+
+jq --version         # 1.6+
+git --version
+claude --version     # or: which claude
+gh --version
+```
 
 ## Installation
 
-### macOS Installation
+### macOS
 
 1. **Install Homebrew** (if not already installed)
    ```bash
    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
    ```
 
-2. **Install jq**
+2. **Install required system tools**
    ```bash
-   brew install jq
+   brew install bash jq git node gh
    ```
+   (macOS ships with Bash 3.2 by default — `brew install bash` gives you 5.x.)
 
 3. **Install Claude CLI**
    ```bash
-   # Follow official installation instructions at:
-   # https://docs.anthropic.com/claude/docs/claude-cli
+   npm install -g @anthropic-ai/claude-code
+   # See https://docs.anthropic.com/claude/docs/claude-cli for details
+   claude --version
    ```
 
-4. **Download Ralph Loop**
+4. **Authenticate `gh`** (skip if you'll always run with `--no-github`)
    ```bash
-   # Clone or download the repository
-   git clone https://github.com/paullovvik/ralph-loop.git
+   gh auth login
+   # For GitHub Projects v2 support (creates project boards per PRD):
+   gh auth refresh -s project,read:project,write:project
+   ```
+
+5. **Optional: install `mcpls` for `--mcp`**
+   ```bash
+   # Follow https://github.com/bug-ops/mcpls — make sure `mcpls` is on PATH.
+   # Install at least one LSP server too, e.g.:
+   brew install rust-analyzer  # Rust
+   npm install -g pyright       # Python
+   npm install -g typescript-language-server typescript  # TS/JS
+   ```
+
+6. **Optional: install GitHub Copilot CLI for `--agent copilot`**
+   ```bash
+   gh extension install github/gh-copilot
+   gh copilot --version
+   ```
+
+7. **Clone Ralph Loop**
+   ```bash
+   git clone https://github.com/ElOrlis/ralph-loop.git
    cd ralph-loop
-   ```
-
-5. **Make the script executable**
-   ```bash
    chmod +x ralph-loop
    ```
 
-6. **Add to PATH (optional)**
+8. **Install Node dependencies** (only required if you plan to run `npm test` against the legacy demo modules; the main loop has no npm runtime deps)
    ```bash
-   # Add to your ~/.bashrc or ~/.zshrc
-   export PATH="$PATH:/path/to/ralph-loop"
-
-   # Or create a symbolic link
-   sudo ln -s /path/to/ralph-loop/ralph-loop /usr/local/bin/ralph-loop
+   npm install
    ```
 
-### Linux Installation
+9. **Add to PATH (optional)**
+   ```bash
+   # Symbolic link is the simplest:
+   sudo ln -s "$(pwd)/ralph-loop" /usr/local/bin/ralph-loop
 
-1. **Install jq**
+   # Or extend PATH from ~/.zshrc / ~/.bashrc:
+   echo 'export PATH="$PATH:'"$(pwd)"'"' >> ~/.zshrc
+   ```
+
+### Linux
+
+1. **Install required system tools**
    ```bash
    # Ubuntu/Debian
    sudo apt-get update
-   sudo apt-get install jq
+   sudo apt-get install -y bash jq git curl
 
    # Fedora/RHEL
-   sudo dnf install jq
+   sudo dnf install -y bash jq git curl
 
-   # Arch Linux
-   sudo pacman -S jq
+   # Arch
+   sudo pacman -S --needed bash jq git curl
    ```
 
-2. **Install Claude CLI**
+2. **Install Node.js 18+**
    ```bash
-   # Follow official installation instructions at:
-   # https://docs.anthropic.com/claude/docs/claude-cli
+   # Easiest cross-distro: nvm
+   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+   source ~/.bashrc
+   nvm install --lts
+   node --version
    ```
 
-3. **Download Ralph Loop**
+3. **Install GitHub CLI (`gh`)**
    ```bash
-   git clone https://github.com/paullovvik/ralph-loop.git
+   # See https://github.com/cli/cli/blob/trunk/docs/install_linux.md for the
+   # canonical instructions. Ubuntu/Debian one-liner:
+   (type -p wget >/dev/null || sudo apt-get install -y wget) \
+     && sudo mkdir -p -m 755 /etc/apt/keyrings \
+     && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+     && sudo apt-get update && sudo apt-get install -y gh
+
+   gh auth login
+   gh auth refresh -s project,read:project,write:project   # optional, for Projects v2
+   ```
+
+4. **Install Claude CLI**
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   claude --version
+   ```
+
+5. **Optional: `mcpls` and an LSP server (for `--mcp`)**
+   See https://github.com/bug-ops/mcpls. Install whichever LSP servers your
+   target codebases use (rust-analyzer, pyright, gopls, etc.) and make sure
+   `mcpls` itself is on `PATH`.
+
+6. **Optional: GitHub Copilot CLI** (for `--agent copilot`)
+   ```bash
+   gh extension install github/gh-copilot
+   ```
+
+7. **Clone Ralph Loop**
+   ```bash
+   git clone https://github.com/ElOrlis/ralph-loop.git
    cd ralph-loop
-   ```
-
-4. **Make the script executable**
-   ```bash
    chmod +x ralph-loop
    ```
 
-5. **Add to PATH (optional)**
+8. **Add to PATH (optional)**
    ```bash
-   # Add to your ~/.bashrc
    echo 'export PATH="$PATH:'"$(pwd)"'"' >> ~/.bashrc
    source ~/.bashrc
-
-   # Or create a symbolic link
-   sudo ln -s $(pwd)/ralph-loop /usr/local/bin/ralph-loop
+   # Or: sudo ln -s "$(pwd)/ralph-loop" /usr/local/bin/ralph-loop
    ```
 
 ### Verify Installation
 
-After installation, verify everything works:
-
 ```bash
-# Check Ralph Loop is accessible
 ralph-loop --help
 
-# Verify all dependencies
-which claude    # Should show path to claude CLI
-which jq        # Should show path to jq
-bash --version  # Should show 4.0 or higher
+# Required:
+bash --version         # 4.0+
+node --version         # 18+
+jq --version           # 1.6+
+git --version
+which claude
+gh --version
+
+# Optional:
+which mcpls            # only if you'll use --mcp
+gh copilot --version   # only if you'll use --agent copilot
 ```
 
 ## Quick Start
@@ -240,6 +304,8 @@ ralph-loop my-project.md --verbose --max-iterations 25
 | `--report` | Print a project-status report for the PRD (offline; no API calls) | Off |
 | `--state-dir <path>` | Use a custom directory for PRD state instead of `.ralph/<slug>/` | - |
 | `--migrate-state` | Move legacy sibling-JSON / cwd-progress files into `.ralph/<slug>/` | Off |
+| `--agent claude\|copilot` | Agent backend used to drive each iteration | `claude` |
+| `--reviewer none\|claude\|copilot\|auto` | Optional second agent that reviews failed criteria; `auto` = the opposite of `--agent` | `none` |
 | `--help` | Show comprehensive help message | - |
 
 ## PRD File Format
@@ -868,6 +934,9 @@ This project is licensed under the MIT License. See the LICENSE file for details
 
 - **Claude CLI Documentation**: https://docs.anthropic.com/claude/docs/claude-cli
 - **jq Documentation**: https://stedolan.github.io/jq/
+- **GitHub CLI (`gh`)**: https://cli.github.com/
+- **GitHub Copilot CLI**: https://docs.github.com/en/copilot/github-copilot-in-the-cli
+- **mcpls**: https://github.com/bug-ops/mcpls
 - **Bash Reference**: https://www.gnu.org/software/bash/manual/
 
 ## Tips for Success
